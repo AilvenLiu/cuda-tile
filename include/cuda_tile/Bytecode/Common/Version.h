@@ -10,6 +10,7 @@
 #ifndef CUDA_TILE_BYTECODE_COMMON_VERSION_H
 #define CUDA_TILE_BYTECODE_COMMON_VERSION_H
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/FormatVariadic.h"
 
 #include <cstdint>
@@ -83,6 +84,11 @@ public:
   /// the most recent version of CUDA Tile IR.
   static const BytecodeVersion kCurrentVersion;
 
+  /// The version when unified bitfield for optional parameters was introduced.
+  /// For versions >= 13.3, all optional parameters (Type, Enum, etc.) use a
+  /// single bitfield. For versions < 13.3, OptionalEnum uses inline flags.
+  static const BytecodeVersion kUnifiedBitfieldVersion;
+
   /// The minimum supported version of the bytecode format.
   static const BytecodeVersion kMinSupportedVersion;
 
@@ -107,6 +113,11 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
                                      const BytecodeVersion &version) {
   return os << version.toString();
 }
+
+/// Returns a list of all supported bytecode versions.
+/// This list is generated from the SupportedVersion definitions in TableGen.
+llvm::SmallVector<BytecodeVersion> getSupportedVersions();
+
 } // namespace mlir::cuda_tile
 
 #endif // CUDA_TILE_BYTECODE_COMMON_VERSION_H

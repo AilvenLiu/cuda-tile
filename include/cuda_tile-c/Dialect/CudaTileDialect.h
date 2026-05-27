@@ -164,6 +164,64 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaTilePartitionViewTypeGetChecked(
     MlirContext ctx, MlirAttribute tileShapeAttr, MlirType tensorViewType,
     intptr_t dimMapRank, const int32_t *dimMap, MlirAttribute paddingValue);
 
+// StridedViewType
+
+/// Returns true if the given type is a cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED bool mlirCudaTileTypeIsAStridedViewType(MlirType type);
+
+/// Returns the TypeID for cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED MlirTypeID mlirCudaTileStridedViewTypeGetTypeID(void);
+
+/// Returns a cuda_tile StridedView with the given tile shape, traversal
+/// strides, tensor view, dim map, and optional padding value.
+MLIR_CAPI_EXPORTED MlirType mlirCudaTileStridedViewTypeGet(
+    MlirContext ctx, MlirAttribute tileShapeAttr,
+    MlirAttribute traversalStridesAttr, MlirType tensorViewType,
+    intptr_t dimMapRank, const int32_t *dimMap, MlirAttribute paddingValue);
+
+/// Returns the tile shape attribute of the given cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaTileStridedViewTypeGetTileShape(MlirType type);
+
+/// Returns the traversal strides attribute of the given cuda_tile
+/// StridedViewType.
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaTileStridedViewTypeGetTraversalStrides(MlirType type);
+
+/// Returns the tensor view type of the given cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaTileStridedViewTypeGetTensorView(MlirType type);
+
+/// Returns the rank of the dim map of the given cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED intptr_t
+mlirCudaTileStridedViewTypeGetDimMapRank(MlirType type);
+
+/// Returns the dim map element at the given index of the given cuda_tile
+/// StridedViewType.
+MLIR_CAPI_EXPORTED int32_t
+mlirCudaTileStridedViewTypeGetDimMapElement(MlirType type, intptr_t pos);
+
+/// Returns the padding value attribute of the given cuda_tile StridedViewType
+/// (may be null).
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaTileStridedViewTypeGetPaddingValue(MlirType type);
+
+/// Returns the view tile type of the given cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaTileStridedViewTypeGetViewTileType(MlirType type);
+
+/// Returns the view index rank of the given cuda_tile StridedViewType.
+MLIR_CAPI_EXPORTED intptr_t
+mlirCudaTileStridedViewTypeGetViewIndexRank(MlirType type);
+
+/// Returns a cuda_tile StridedViewType with the given tile shape, traversal
+/// strides, tensor view, dim map, and padding value, performing verification.
+/// Returns a null type if verification fails.
+MLIR_CAPI_EXPORTED MlirType mlirCudaTileStridedViewTypeGetChecked(
+    MlirContext ctx, MlirAttribute tileShapeAttr,
+    MlirAttribute traversalStridesAttr, MlirType tensorViewType,
+    intptr_t dimMapRank, const int32_t *dimMap, MlirAttribute paddingValue);
+
 // RoundingModeAttr
 
 /// Returns true if the given attribute is a cuda_tile RoundingModeAttr.
@@ -310,6 +368,20 @@ mlirCudaTileSignednessAttrGet(MlirContext ctx, MlirStringRef value);
 MLIR_CAPI_EXPORTED MlirStringRef
 mlirCudaTileSignednessAttrGetValue(MlirAttribute attr);
 
+// SymbolVisibilityAttr
+
+/// Returns true if the given attribute is a cuda_tile SymbolVisibilityAttr.
+MLIR_CAPI_EXPORTED bool
+mlirCudaTileAttributeIsASymbolVisibilityAttr(MlirAttribute attr);
+
+/// Returns a cuda_tile SymbolVisibilityAttr with the given visibility string.
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaTileSymbolVisibilityAttrGet(MlirContext ctx, MlirStringRef value);
+
+/// Returns the visibility string of the given cuda_tile SymbolVisibilityAttr.
+MLIR_CAPI_EXPORTED MlirStringRef
+mlirCudaTileSymbolVisibilityAttrGetValue(MlirAttribute attr);
+
 // OptimizationHintsAttr
 
 /// Returns true if the given attribute is a cuda_tile OptimizationHintsAttr.
@@ -326,6 +398,7 @@ MLIR_CAPI_EXPORTED MlirAttribute
 mlirCudaTileOptimizationHintsAttrGetEntryOpHint(MlirContext ctx,
                                                 MlirStringRef arch,
                                                 int32_t numCta,
+                                                int32_t numWorkerWarps,
                                                 int32_t occupancy);
 
 /// Returns a cuda_tile OptimizationHintsAttr with LoadStore hints for the given

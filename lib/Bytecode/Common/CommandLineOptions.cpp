@@ -48,7 +48,7 @@ public:
     if (!version) {
       return o.error(
           llvm::formatv(
-              "Invalid argument '{0}': the supported versions are [{1}, {2}]",
+              "Invalid argument '{0}': the supported versions are [{1} - {2}]",
               arg, BytecodeVersion::kMinSupportedVersion,
               BytecodeVersion::kCurrentVersion)
               .str());
@@ -64,6 +64,10 @@ public:
 
 // Static storage for command line option value.
 static BytecodeVersion *bytecodeVersionPtr = nullptr;
+
+// Static storage for hints command line option value.
+static bool warnUnsupportedHintsVar = false;
+static bool errorUnsupportedHintsVar = false;
 } // namespace
 
 void mlir::cuda_tile::registerTileIRBytecodeVersionOption() {
@@ -81,3 +85,40 @@ BytecodeVersion mlir::cuda_tile::getCurrentBytecodeVersion() {
   return bytecodeVersionPtr ? *bytecodeVersionPtr
                             : BytecodeVersion::kCurrentVersion;
 }
+
+void mlir::cuda_tile::registerTileIROptimizationHintsOptions() {
+  // Register command line option for hint diagnostics
+  static llvm::cl::opt<bool, true> warnUnsupportedHints(
+      "Wunsupported-hints",
+      llvm::cl::desc(
+          "Enable warnings for unsupported/invalid optimization hints."),
+      llvm::cl::location(warnUnsupportedHintsVar), llvm::cl::init(false));
+
+  static llvm::cl::opt<bool, true> errorOnHints(
+      "Werr-hints",
+      llvm::cl::desc("Treat unsupported/invalid optimization hints as errors."),
+      llvm::cl::location(errorUnsupportedHintsVar), llvm::cl::init(false));
+}
+
+bool mlir::cuda_tile::getWarnUnsupportedHints() {
+  return warnUnsupportedHintsVar;
+}
+
+bool mlir::cuda_tile::getErrorUnsupportedHints() {
+  return errorUnsupportedHintsVar;
+}
+
+void mlir::cuda_tile::registerListVersionsOption() {
+  static llvm::cl::opt<bool> listVersions(
+      "list-versions",
+      llvm::cl::desc("List all supported bytecode versions and exit"),
+      llvm::cl::init(false), llvm::cl::callback([](const bool &val) {
+        if (val) {
+          auto versions = getSupportedVersions();
+          for (const auto &version : versions)
+            llvm::outs() << version.toString() << "\n";
+          exit(0);
+        }
+      }));
+}
+

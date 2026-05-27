@@ -440,6 +440,10 @@ generateAttributeDeserialization(const Operator &op, raw_ostream &os,
           // IntegerAttr needs a type.
           os << "    " << varName << " = ::mlir::IntegerAttr::get("
              << expectedTypeArg << ", " << *defaultValue << ");\n";
+        } else if (baseCppTypeStr.contains("BoolAttr")) {
+          // BoolAttr construction.
+          os << "    " << varName << " = ::mlir::BoolAttr::get(&context, "
+             << *defaultValue << ");\n";
         } else if (baseCppTypeStr.contains("cuda_tile::")) {
           // Custom cuda_tile attributes follow the standard pattern.
           os << "    " << varName << " = " << baseCppTypeStr

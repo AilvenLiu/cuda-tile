@@ -320,7 +320,7 @@ static LogicalResult parseHeader(EncodingReader &reader, MLIRContext &context,
     return reader.emitError()
            << "unsupported Tile version " << verMajor << "." << verMinor << "."
            << tag << ", this reader supports versions ["
-           << BytecodeVersion::kMinSupportedVersion.toString() << ", "
+           << BytecodeVersion::kMinSupportedVersion.toString() << " - "
            << BytecodeVersion::kCurrentVersion.toString() << "]";
   }
   version = *versionInfo;
@@ -433,57 +433,14 @@ static LogicalResult parseStringSection(ArrayRef<uint8_t> payload,
 #define GEN_OPCODE_ENUM
 #include "StaticOpcodes.inc"
 
-// Generic template for symbolizing enums from an integer value.
-template <typename EnumType>
-static std::optional<EnumType> symbolizeEnum(uint32_t value);
+// Auto-generated is_cuda_tile_enum_attr type trait and symbolizeEnum
+// specializations.
+#define GEN_ENUM_ATTR_TYPE_TRAIT
+#include "../Writer/AttrBytecode.inc"
 
-// Specializations for CUDA tile enum types.
-template <>
-std::optional<cuda_tile::RoundingMode>
-symbolizeEnum<cuda_tile::RoundingMode>(uint32_t value) {
-  return cuda_tile::symbolizeRoundingMode(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::ComparisonPredicate>
-symbolizeEnum<cuda_tile::ComparisonPredicate>(uint32_t value) {
-  return cuda_tile::symbolizeComparisonPredicate(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::ComparisonOrdering>
-symbolizeEnum<cuda_tile::ComparisonOrdering>(uint32_t value) {
-  return cuda_tile::symbolizeComparisonOrdering(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::AtomicRMWMode>
-symbolizeEnum<cuda_tile::AtomicRMWMode>(uint32_t value) {
-  return cuda_tile::symbolizeAtomicRMWMode(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::MemoryOrderingSemantics>
-symbolizeEnum<cuda_tile::MemoryOrderingSemantics>(uint32_t value) {
-  return cuda_tile::symbolizeMemoryOrderingSemantics(
-      static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::MemoryScope>
-symbolizeEnum<cuda_tile::MemoryScope>(uint32_t value) {
-  return cuda_tile::symbolizeMemoryScope(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::IntegerOverflow>
-symbolizeEnum<cuda_tile::IntegerOverflow>(uint32_t value) {
-  return cuda_tile::symbolizeIntegerOverflow(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::PaddingValue>
-symbolizeEnum<cuda_tile::PaddingValue>(uint32_t value) {
-  return cuda_tile::symbolizePaddingValue(static_cast<int32_t>(value));
-}
-template <>
-std::optional<cuda_tile::Signedness>
-symbolizeEnum<cuda_tile::Signedness>(uint32_t value) {
-  return cuda_tile::symbolizeSignedness(static_cast<int32_t>(value));
-}
+// Auto-generated enum attr version checking.
+#define GEN_ENUM_ATTR_VERSION_CHECK
+#include "../Writer/AttrBytecode.inc"
 
 /// Generic helper to parse an enum attribute.
 template <typename AttrType>
@@ -525,10 +482,12 @@ class LazyTypeTable {
 public:
   LazyTypeTable(MLIRContext &context) : context(context) {}
 
-  void initialize(ArrayRef<uint8_t> payloadData, ArrayRef<uint32_t> indices) {
+  void initialize(ArrayRef<uint8_t> payloadData, ArrayRef<uint32_t> indices,
+                  const BytecodeVersion &version) {
     payload = payloadData;
     typeStartIndices = indices;
     typeCache.resize(indices.size());
+    fileVersion = version;
   }
 
   Type getType(uint64_t typeIndex) {
@@ -542,8 +501,8 @@ public:
       return Type();
     // Mark this type as currently being parsed.
     currentlyParsing.insert(typeIndex);
-    auto removeIndex =
-        llvm::scope_exit([&] { currentlyParsing.erase(typeIndex); });
+    [[maybe_unused]] llvm::scope_exit removeIndex(
+        [&] { currentlyParsing.erase(typeIndex); });
     // Calculate the boundaries for the type data.
     uint32_t start = typeStartIndices[typeIndex];
     uint32_t end = (typeIndex + 1 < typeStartIndices.size())
@@ -569,6 +528,9 @@ public:
   }
 
   size_t size() const { return typeStartIndices.size(); }
+
+  /// Returns the bytecode file version.
+  BytecodeVersion getFileVersion() const { return fileVersion; }
 
   /// Reads a type index using the provided reader and retrieves the
   /// corresponding Type. Emits an error and returns a null Type on failure.
@@ -639,13 +601,15 @@ private:
   ArrayRef<uint32_t> typeStartIndices;
   std::vector<Type> typeCache;
   DenseSet<uint64_t> currentlyParsing;
+  BytecodeVersion fileVersion;
 };
 } // end anonymous namespace
 
 /// Parses the type section and initializes the lazy type table
 static LogicalResult parseTypeSection(ArrayRef<uint8_t> payload,
                                       LazyTypeTable &types,
-                                      MLIRContext &context) {
+                                      MLIRContext &context,
+                                      const BytecodeVersion &bytecodeVersion) {
   EncodingReader reader(payload, context);
   uint64_t numTypes;
   if (failed(reader.readVarInt(numTypes)))
@@ -653,7 +617,8 @@ static LogicalResult parseTypeSection(ArrayRef<uint8_t> payload,
 
   // Handle empty type table case.
   if (numTypes == 0) {
-    types.initialize(ArrayRef<uint8_t>(), ArrayRef<uint32_t>());
+    types.initialize(ArrayRef<uint8_t>(), ArrayRef<uint32_t>(),
+                     bytecodeVersion);
     return success();
   }
 
@@ -678,7 +643,7 @@ static LogicalResult parseTypeSection(ArrayRef<uint8_t> payload,
     return failure();
   // Initialize the lazy type table with the payload and indices
   ArrayRef<uint8_t> typeData = payload.slice(reader.currentOffset());
-  types.initialize(typeData, typeStartIndices);
+  types.initialize(typeData, typeStartIndices, bytecodeVersion);
   return success();
 }
 
@@ -731,8 +696,9 @@ public:
     ArrayRef<char> rawData(reinterpret_cast<const char *>(rawUint8Data.data()),
                            rawUint8Data.size());
     // Validate the buffer size and format.
-    if (!DenseElementsAttr::isValidRawBuffer(tileType, rawData))
+    if (!DenseElementsAttr::isValidRawBuffer(tileType, rawData)) {
       return reader.emitError() << "failed to validate buffer size and format";
+    }
 
     DenseElementsAttr attr = nullptr;
     // Handle endianness conversion.
@@ -920,8 +886,8 @@ private:
       return Attribute();
     // Mark this index as currently being parsed.
     currentlyParsing.insert(diIndex);
-    auto removeIndex =
-        llvm::scope_exit([&] { currentlyParsing.erase(diIndex); });
+    [[maybe_unused]] llvm::scope_exit removeIndex(
+        [&] { currentlyParsing.erase(diIndex); });
 
     // Slice the payload to get the data for this debug info attribute.
     EncodingReader diReader(diData.slice(start, end - start), context);
@@ -1159,19 +1125,8 @@ private:
 
 namespace {
 
-// Type trait to check if T is one of the specified CUDA tile enum attribute
-// types.
-template <typename T>
-struct is_cuda_tile_enum_attr
-    : std::disjunction<std::is_same<T, cuda_tile::RoundingModeAttr>,
-                       std::is_same<T, cuda_tile::ComparisonPredicateAttr>,
-                       std::is_same<T, cuda_tile::ComparisonOrderingAttr>,
-                       std::is_same<T, cuda_tile::AtomicRMWModeAttr>,
-                       std::is_same<T, cuda_tile::MemoryOrderingSemanticsAttr>,
-                       std::is_same<T, cuda_tile::MemoryScopeAttr>,
-                       std::is_same<T, cuda_tile::IntegerOverflowAttr>,
-                       std::is_same<T, cuda_tile::PaddingValueAttr>,
-                       std::is_same<T, cuda_tile::SignednessAttr>> {};
+// is_cuda_tile_enum_attr is now auto-generated - see AttrBytecode.inc included
+// above.
 
 class InstructionParser {
   //===----------------------------------------------------------------------===//
@@ -1501,12 +1456,28 @@ class InstructionParser {
     return success();
   }
 
+#ifdef TILE_IR_INCLUDE_TESTS
+  /// Parses a BytecodeTestValueAttr attribute.
+  static LogicalResult
+  parseBytecodeTestValueAttr(EncodingReader &reader, MLIRContext &context,
+                             cuda_tile::BytecodeTestValueAttr &nativeValue) {
+    uint64_t value;
+    if (failed(reader.readSignedVarInt(value)))
+      return reader.emitError()
+             << "failed to read value for BytecodeTestValueAttr";
+    nativeValue = cuda_tile::BytecodeTestValueAttr::get(
+        &context, static_cast<int64_t>(value));
+    return success();
+  }
+#endif // TILE_IR_INCLUDE_TESTS
+
   /// Base template: Parse attribute and convert to native type T
   /// Note about expectedType:
   /// - REQUIRED for inline IntegerAttr to determine the bit width.
   /// - REQUIRED for DenseElementsAttr when parsing constant indices.
   /// - Passed recursively for nested structures like std::optional.
   /// - Optional/nullptr otherwise.
+  /// TODO: Auto-generate CudaTile attribute parsing from TableGen (like types).
   template <typename T>
   static LogicalResult
   parseOpAttribute(EncodingReader &reader, MLIRContext &context,
@@ -1613,6 +1584,11 @@ class InstructionParser {
       nativeValue = mlir::FlatSymbolRefAttr::get(&context, strRef);
       return success();
     } else if constexpr (is_cuda_tile_enum_attr<T>::value) {
+      // Check version before parsing enum attr.
+      if (!isEnumAttrAvailableInVersion<T>(types.getFileVersion()))
+        return reader.emitError()
+               << "enum attribute type is not available in bytecode version "
+               << types.getFileVersion().toString();
       return parseGenericEnumAttr(reader, context, nativeValue);
     } else if constexpr (std::is_base_of_v<DenseElementsAttr, T> ||
                          std::is_same_v<T, DenseElementsAttr>) {
@@ -1651,6 +1627,10 @@ class InstructionParser {
       return success();
     } else if constexpr (std::is_same_v<T, cuda_tile::DivByAttr>) {
       return parseDivByAttr(reader, context, nativeValue);
+#ifdef TILE_IR_INCLUDE_TESTS
+    } else if constexpr (std::is_same_v<T, cuda_tile::BytecodeTestValueAttr>) {
+      return parseBytecodeTestValueAttr(reader, context, nativeValue);
+#endif // TILE_IR_INCLUDE_TESTS
     } else if constexpr (std::is_same_v<T, cuda_tile::SameElementsAttr>) {
       DenseI64ArrayAttr valuesAttr;
       if (failed(parseOpAttribute(reader, context, types, constants, constCache,
@@ -1851,6 +1831,12 @@ public:
       cuda_tile::BoundedAttr elem;
       return parseAttr(elem);
     }
+#ifdef TILE_IR_INCLUDE_TESTS
+    case Bytecode::AttributeTag::BytecodeTestValue: {
+      cuda_tile::BytecodeTestValueAttr elem;
+      return parseAttr(elem);
+    }
+#endif // TILE_IR_INCLUDE_TESTS
     default:
       return reader.emitError() << "unsupported AttributeTag " << attributeTag
                                 << " for self-contained attribute";
@@ -2244,6 +2230,9 @@ static LogicalResult createFunction(
 //   valueTypeIndex[varint]     // Index into the type table.
 //   constantValueIndex[varint] // Index into the constant table.
 //   alignment[varint]          // Alignment of the global variable.
+//   symbolVisibility[varint]   // Symbol visibility (0=Public, 1=Private).
+//   constant[varint]           // Whether the global is constant (0=false,
+//   1=true).
 //
 namespace {
 struct GlobalInfo {
@@ -2251,14 +2240,17 @@ struct GlobalInfo {
   uint64_t valueTypeIndex;
   uint64_t constantValueIndex;
   uint64_t alignment;
+  uint64_t symbolVisibility;
+  uint64_t constant;
 };
 } // end anonymous namespace
 
 /// Parses the global section and creates metadata for each global variable.
-static LogicalResult parseGlobalSection(ArrayRef<uint8_t> payload,
-                                        const EncodingReader &mainReader,
-                                        std::vector<GlobalInfo> &globalInfoList,
-                                        MLIRContext &context) {
+static LogicalResult
+parseGlobalSection(ArrayRef<uint8_t> payload, const EncodingReader &mainReader,
+                   std::vector<GlobalInfo> &globalInfoList,
+                   MLIRContext &context,
+                   const BytecodeVersion &bytecodeVersion) {
   EncodingReader sectionReader(payload, context);
   sectionReader.inheritStringTableFrom(mainReader);
 
@@ -2266,8 +2258,13 @@ static LogicalResult parseGlobalSection(ArrayRef<uint8_t> payload,
   if (failed(sectionReader.readVarInt(numGlobals)))
     return sectionReader.emitError() << "failed to read number of global.";
 
-  // A global entry has at least 4 varints, each at least 1 byte.
-  static constexpr size_t kMinGlobalInfoSize = 4;
+  // Determine minimum size based on bytecode version.
+  // Version 13.1: 4 varints (symbolNameIndex, valueTypeIndex,
+  // constantValueIndex, alignment) Version 13.3+: 6 varints (added
+  // symbolVisibility and constant)
+  auto version_13_3 = BytecodeVersion::fromVersion(13, 3, 0);
+  size_t kMinGlobalInfoSize = (bytecodeVersion >= *version_13_3) ? 6 : 4;
+
   if (numGlobals >
       (payload.size() - sectionReader.currentOffset()) / kMinGlobalInfoSize) {
     return sectionReader.emitError()
@@ -2300,8 +2297,55 @@ static LogicalResult parseGlobalSection(ArrayRef<uint8_t> payload,
     if (failed(sectionReader.readVarInt(globalInfo.alignment)))
       return sectionReader.emitError() << "failed to read global alignment";
 
+    // 5. Read symbol_visibility (added in version 13.3).
+    if (bytecodeVersion >= *version_13_3) {
+      if (failed(sectionReader.readVarInt(globalInfo.symbolVisibility)))
+        return sectionReader.emitError()
+               << "failed to read global symbol visibility";
+    } else {
+      // For older bytecode versions (< 13.3), use default value (Public = 0).
+      globalInfo.symbolVisibility = 0; // SymbolVisibility::Public
+    }
+
+    // 6. Read constant (added in version 13.3).
+    if (bytecodeVersion >= *version_13_3) {
+      if (failed(sectionReader.readVarInt(globalInfo.constant)))
+        return sectionReader.emitError()
+               << "failed to read global constant flag";
+    } else {
+      // For older bytecode versions (< 13.3), use default value (false).
+      globalInfo.constant = 0;
+    }
+
     globalInfoList.emplace_back(globalInfo);
   }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Producer Section
+//===----------------------------------------------------------------------===//
+// producer-section =:
+//   producerStringIndex[varint]  // Index into the string table
+//
+/// Parses the producer section and returns the producer string.
+static LogicalResult parseProducerSection(ArrayRef<uint8_t> payload,
+                                          const EncodingReader &mainReader,
+                                          std::optional<StringRef> &producer,
+                                          MLIRContext &context) {
+  EncodingReader sectionReader(payload, context);
+  sectionReader.inheritStringTableFrom(mainReader);
+
+  uint64_t producerIndex;
+  if (failed(sectionReader.readVarInt(producerIndex)))
+    return sectionReader.emitError() << "failed to read producer string index";
+
+  StringRef producerStr;
+  if (failed(sectionReader.getString(producerIndex, producerStr, context)))
+    return sectionReader.emitError()
+           << "failed to get producer string at index " << producerIndex;
+
+  producer = producerStr;
   return success();
 }
 
@@ -2339,8 +2383,27 @@ createGlobal(const GlobalInfo &globalInfo, OpBuilder &builder,
   // Global variables must not have DILocAttr location type because CudaTile
   // supports only local scope. Therefore, global variables must have UnknownLoc
   // location type - the only other legal location type.
-  cuda_tile::GlobalOp::create(builder, UnknownLoc::get(&context), symNameStr,
-                              denseValueAttr, globalInfo.alignment);
+  //
+  // Convert symbolVisibility from serialized integer to enum, then to
+  // attribute.
+  auto symbolVisibility =
+      symbolizeSymbolVisibility(globalInfo.symbolVisibility);
+  if (!symbolVisibility.has_value())
+    return reader.emitError() << "invalid symbol visibility value: "
+                              << globalInfo.symbolVisibility;
+
+  auto symbolVisibilityAttr =
+      cuda_tile::SymbolVisibilityAttr::get(&context, symbolVisibility.value());
+
+  // Convert constant from uint64_t (0=not present, !=0=present) to UnitAttr.
+  // UnitAttr is present (non-null) when constant!=0, otherwise nullptr.
+  auto constantAttr =
+      (globalInfo.constant != 0) ? mlir::UnitAttr::get(&context) : nullptr;
+
+  cuda_tile::GlobalOp::create(builder, UnknownLoc::get(&context),
+                              builder.getStringAttr(symNameStr), denseValueAttr,
+                              builder.getI64IntegerAttr(globalInfo.alignment),
+                              constantAttr, symbolVisibilityAttr);
   return success();
 }
 
@@ -2483,6 +2546,7 @@ cuda_tile::readBytecode(llvm::MemoryBufferRef bytecodeBuffer,
   std::vector<Value> valueIndexList;
   DenseElementsAttrCache globalConstCache;
   std::vector<GlobalInfo> globalInfoList;
+  std::optional<StringRef> producer;
 
   // Process sections in dependency order using their stored payloads.
   // Parse String Section.
@@ -2493,10 +2557,15 @@ cuda_tile::readBytecode(llvm::MemoryBufferRef bytecodeBuffer,
   } else {
     return reader.emitError() << "string section is mandatory", nullptr;
   }
+  // Parse Producer Section (optional).
+  if (sectionPayloads[Section::Producer].has_value())
+    if (failed(parseProducerSection(*sectionPayloads[Section::Producer], reader,
+                                    producer, context)))
+      return reader.emitError() << "failed to parse producer section", nullptr;
   // Parse Type Section.
   if (sectionPayloads[Section::Type].has_value())
-    if (failed(
-            parseTypeSection(*sectionPayloads[Section::Type], types, context)))
+    if (failed(parseTypeSection(*sectionPayloads[Section::Type], types, context,
+                                bytecodeVersion)))
       return reader.emitError() << "failed to parse type section", nullptr;
   // Parse Constant Section.
   if (sectionPayloads[Section::Constant].has_value())
@@ -2508,7 +2577,7 @@ cuda_tile::readBytecode(llvm::MemoryBufferRef bytecodeBuffer,
           .has_value())
     if (failed(parseGlobalSection(
             *sectionPayloads[static_cast<uint8_t>(Bytecode::Section::Global)],
-            reader, globalInfoList, context)))
+            reader, globalInfoList, context, bytecodeVersion)))
       return reader.emitError() << "failed to parse global section", nullptr;
   // Parse Function Section.
   if (sectionPayloads[Section::Func].has_value()) {
@@ -2526,8 +2595,9 @@ cuda_tile::readBytecode(llvm::MemoryBufferRef bytecodeBuffer,
       return reader.emitError() << "failed to parse debug section", nullptr;
 
   OpBuilder moduleBuilder(&context);
-  OwningOpRef<cuda_tile::ModuleOp> cudaTileModule(cuda_tile::ModuleOp::create(
-      moduleBuilder, UnknownLoc::get(&context), "kernels"));
+  OwningOpRef<cuda_tile::ModuleOp> cudaTileModule(
+      cuda_tile::ModuleOp::create(moduleBuilder, UnknownLoc::get(&context),
+                                  "kernels", producer.value_or("")));
   OpBuilder builder(cudaTileModule->getBody());
   OpBuilder funcBuilder(&cudaTileModule->getBody().front(),
                         cudaTileModule->getBody().front().begin());

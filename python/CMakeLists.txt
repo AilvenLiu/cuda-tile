@@ -52,6 +52,9 @@ declare_mlir_dialect_python_bindings(
   SOURCES
     dialects/cuda_tile_ops.py
   DIALECT_NAME cuda_tile
+  # Explicitly depend on the actual Ops.td file that CudaTileOps.td includes.
+  # This ensures Python bindings are regenerated when Ops.td changes.
+  DEPENDS "${CUDA_TILE_SOURCE_DIR}/include/cuda_tile/Dialect/CudaTile/IR/Ops.td"
   GEN_ENUM_BINDINGS_TD_FILE
     "../../include/cuda_tile/Dialect/CudaTile/IR/Types.td"
 )

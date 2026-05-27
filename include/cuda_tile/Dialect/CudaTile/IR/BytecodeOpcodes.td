@@ -10,6 +10,7 @@
 // Bytecode Opcode Assignments for CudaTile Operations
 // This file defines the explicit opcode assignments to ensure backward
 // compatibility across versions.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef CUDATILE_DIALECT_CUDATILE_IR_BYTECODE_OPCODES_TD
@@ -36,12 +37,24 @@ class SupportedVersion<int major, int minor> {
   int minorVersion = minor;
 }
 
+/// Defines a valid opcode range for a category of operations.
+class OpcodeRange<int min, int max> {
+  int minValue = min;
+  int maxValue = max;
+}
+
+def PublicOpcodeRange : OpcodeRange<0x0, 0xFFF>;
+#ifdef TILE_IR_INCLUDE_TESTS
+def TestingOpcodeRange : OpcodeRange<0x3000, 0xFFFFFFFF>;
+#endif // TILE_IR_INCLUDE_TESTS
+
 //===----------------------------------------------------------------------===//
 // Supported Bytecode Versions.
 //===----------------------------------------------------------------------===//
 
 def : SupportedVersion<13, 1>;
 def : SupportedVersion<13, 2>;
+def : SupportedVersion<13, 3>;
 
 // Testing versions - only available when TILE_IR_INCLUDE_TESTS is defined
 #ifdef TILE_IR_INCLUDE_TESTS
@@ -148,6 +161,13 @@ def : PublicOpcode<CudaTile_TruncIOp, 0x6B>;
 def : PublicOpcode<CudaTile_XOrIOp, 0x6C>;
 def : PublicOpcode<CudaTile_YieldOp, 0x6D>;
 def : PublicOpcode<CudaTile_Atan2Op, 0x6E>;
+def : PublicOpcode<CudaTile_PackOp, 0x6F>;
+def : PublicOpcode<CudaTile_UnpackOp, 0x70>;
+def : PublicOpcode<CudaTile_AllocaOp, 0x71>;
+def : PublicOpcode<CudaTile_MmaFScaledOp, 0x72>;
+def : PublicOpcode<CudaTile_MakeGatherScatterViewOp, 0x73>;
+def : PublicOpcode<CudaTile_MakeStridedViewOp, 0x74>;
+def : PublicOpcode<CudaTile_AtomicRedViewTkoOp, 0x75>;
 
 #ifdef TILE_IR_INCLUDE_TESTS
 // TESTING OPERATIONS (0x3000+) - Only available when TILE_IR_INCLUDE_TESTS is defined.

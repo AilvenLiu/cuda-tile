@@ -47,6 +47,10 @@ void generateSerializerDispatch(const BytecodeTypeStructure &structure,
 void generateDeserializerDispatch(const BytecodeTypeStructure &structure,
                                   llvm::raw_ostream &os);
 
+/// Generate dependent type registration logic for TypeManager.
+void generateDependentTypeRegistration(const BytecodeTypeStructure &structure,
+                                       llvm::raw_ostream &os);
+
 } // namespace tblgen
 } // namespace mlir
 

@@ -1,4 +1,4 @@
-//===- cuda-tile-optimize.cpp -----------------------------------*- C++ -*-===//
+//===- cuda-tile-optimize.cpp - CUDA Tile Optimizer Interface ---*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -7,9 +7,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements the CUDA Tile Optimizer,
+// This file implements the command line interface for the CUDA Tile Optimizer,
 // which is a standalone tool that performs CUDA Tile IR Bytecode -> CUDA Tile
-// IR Bytecode optimization.
+// IR Bytecode transformations.
+//
 //
 //===----------------------------------------------------------------------===//
 
@@ -120,7 +121,7 @@ struct Options {
   };
   llvm::cl::opt<bool> verbose{
       "verbose",
-      llvm::cl::desc("Enable verbose output from CudaTileOptimizer"),
+      llvm::cl::desc("Enable verbose output from TileIROptimizer"),
       llvm::cl::init(false),
       llvm::cl::cat(optCategory),
   };
@@ -162,8 +163,8 @@ int main(int argc, char **argv) {
     //   {1}: The build date.
     //   {2}: Optional tool version.
     constexpr StringLiteral versionFormat = R"(
-cuda-tile-optimize: NVIDIA (R) Cuda TileIR->TileIR optimizer
-Copyright (c) 2005-{0} NVIDIA Corporation
+cuda-tile-optimize: NVIDIA (R) CUDA Tile IR -> CUDA Tile IR optimizer
+Apache-2.0 WITH LLVM-exception
 Built on {1}
 {2})";
 
@@ -171,9 +172,9 @@ Built on {1}
                         toolVersion);
   });
 
-  if (!llvm::cl::ParseCommandLineOptions(argc, argv,
-                                         "cuda-tile-optimize: NVIDIA (R) CUDA "
-                                         "Tile IR -> CUDA Tile IR optimizer\n"))
+  if (!llvm::cl::ParseCommandLineOptions(
+          argc, argv,
+          "cuda-tile-optimize: NVIDIA (R) CUDA Tile IR -> CUDA Tile IR optimizer\n"))
     return 1;
 
   if (options.inputFile.empty()) {

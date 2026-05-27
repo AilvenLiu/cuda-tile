@@ -219,6 +219,31 @@ def test_memory_scope_attr():
 
 
 ###############################################################################
+### cuda_tile.SymbolVisibilityAttr
+###############################################################################
+
+
+def test_symbol_visibility_attr():
+    from cuda_tile._mlir._mlir_libs._cuda_tile import SymbolVisibilityAttr
+    from cuda_tile._mlir.ir import Context, Attribute
+
+    with Context() as ctx:
+        register_dialect(ctx, load=True)
+
+        # Test public visibility (default)
+        public_vis = SymbolVisibilityAttr.get("public")
+        assert public_vis.value == "public"
+
+        # Test private visibility
+        private_vis = SymbolVisibilityAttr.get("private")
+        assert private_vis.value == "private"
+
+        # Test invalid symbol visibility
+        with pytest.raises(ValueError, match="Invalid symbol visibility: invalid_vis"):
+            SymbolVisibilityAttr.get("invalid_vis")
+
+
+###############################################################################
 ### cuda_tile.AtomicRMWModeAttr
 ###############################################################################
 

@@ -1088,3 +1088,32 @@ cuda_tile.module @cuda_module {
     return
   }
 }
+
+// -----
+// Canonicalization of AssumeOp - folding consecutive assume ops with the same predicate
+module {
+  cuda_tile.module @cuda_module {
+    testing$func @test_assume_fold(%arg0: tile<ptr<f32>>, %arg1: tile<i32>, %arg2: tile<4x8x16xi32>) -> (tile<ptr<f32>>, tile<i32>, tile<4x8x16xi32>) {
+      // CHECK: %[[A0:.*]] = assume div_by<16>, {{.*}} : tile<ptr<f32>>
+      // CHECK-NOT: assume div_by<16>
+      // CHECK: assume div_by<8>, %[[A0]] : tile<ptr<f32>>
+      // CHECK: %[[A3:.*]] = assume bounded<0, 42>, {{.*}} : tile<i32>
+      // CHECK: assume bounded<?, 42>, %[[A3]] : tile<i32>
+      // CHECK-NOT: assume bounded
+      // CHECK: %[[A5:.*]] = assume div_by<16, every 4 along 1>, {{.*}} : tile<4x8x16xi32>
+      // CHECK: assume same_elements<[1, 4, 2]>, %[[A5]] : tile<4x8x16xi32>
+      // CHECK-NOT: assume same_elements
+
+      %assume = assume div_by<16>, %arg0 : tile<ptr<f32>>
+      %assume_0 = assume div_by<16>, %assume : tile<ptr<f32>>
+      %assume_1 = assume div_by<8>, %assume_0 : tile<ptr<f32>>
+      %assume_2 = assume bounded<0, 42>, %arg1 : tile<i32>
+      %assume_3 = assume bounded<?, 42>, %assume_2 : tile<i32>
+      %assume_4 = assume bounded<?, 42>, %assume_3 : tile<i32>
+      %assume_5 = assume div_by<16, every 4 along 1>, %arg2 : tile<4x8x16xi32>
+      %assume_6 = assume same_elements<[1, 4, 2]>, %assume_5 : tile<4x8x16xi32>
+      %assume_7 = assume same_elements<[1, 4, 2]>, %assume_6 : tile<4x8x16xi32>
+      return %assume_1, %assume_4, %assume_7 : tile<ptr<f32>>, tile<i32>, tile<4x8x16xi32>
+    }
+  }
+}

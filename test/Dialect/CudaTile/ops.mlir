@@ -3,10 +3,39 @@
 
 cuda_tile.module @kernels {
 
-  // CHECK: global @g1 <f32: [1.000000e+00, 2.000000e+00]> : tile<2xf32>
-  global @g1 <f32 : [1.0, 2.0]> : !cuda_tile.tile<2xf32>
+  // CHECK: global constant @g1 <f32: [1.000000e+00, 2.000000e+00]> : tile<2xf32>
+  global constant @g1 <f32 : [1.0, 2.0]> : !cuda_tile.tile<2xf32>
   // CHECK: global @g2 alignment = 256 <f32: [1.000000e+00, 2.000000e+00]> : tile<2xf32>
   global @g2 alignment = 256 <f32: [1.0, 2.0]> : !cuda_tile.tile<2xf32>
+  
+  // Test sym_visibility attribute - default (public, omitted in output)
+  // CHECK: global @g3 <i32: 42> : tile<1xi32>
+  global @g3 <i32: [42]> : !cuda_tile.tile<1xi32>
+  
+  // Test sym_visibility attribute - explicit public (omitted in output)
+  // CHECK: global @g4 <i32: 42> : tile<1xi32>
+  global public @g4 <i32: [42]> : !cuda_tile.tile<1xi32>
+  
+  // Test sym_visibility attribute - private
+  // CHECK: global private @g5 <i32: 10> : tile<1xi32>
+  global private @g5 <i32: [10]> : !cuda_tile.tile<1xi32>
+  
+  // Test sym_visibility with alignment
+  // CHECK: global private @g7 alignment = 128 <i64: 100> : tile<1xi64>
+  global private @g7 alignment = 128 <i64: [100]> : !cuda_tile.tile<1xi64>
+  
+  // Test constant qualifier
+  // CHECK: global constant @g8 <f32: 3.140000e+00> : tile<1xf32>
+  global constant @g8 <f32: [3.14]> : !cuda_tile.tile<1xf32>
+  
+  // Test constant with visibility
+  // CHECK: global private constant @g9 <i32: 255> : tile<1xi32>
+  global private constant @g9 <i32: [255]> : !cuda_tile.tile<1xi32>
+  
+  // Test constant with alignment
+  // CHECK: global constant @g10 alignment = 128 <f64: 2.718000e+00> : tile<1xf64>
+  global constant @g10 alignment = 128 <f64: [2.718]> : !cuda_tile.tile<1xf64>
+  
   entry @kernel8() {
     // CHECK: get_global @g1 : tile<ptr<f32>>
     %0 = get_global @g1 : tile<ptr<f32>>
@@ -36,6 +65,9 @@ cuda_tile.module @kernels {
 
   // CHECK: %[[cf16_tensor:.*]] = constant <f16: {{\[}}[2.000000e+00, 1.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf16>
   %cf16_tensor = constant <f16: [[2.0, 1.0], [4.0, 5.0]]> : !cuda_tile.tile<2x2xf16>
+
+  // CHECK: %[[cf4_tensor:.*]] = constant <f4E2M1FN: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 6.000000e+00]]> : tile<2x2xf4E2M1FN>
+  %cf4_tensor = constant <f4E2M1FN: [[1.0, 2.0], [4.0, 6.0]]> : !cuda_tile.tile<2x2xf4E2M1FN>
 
   // CHECK: %[[c_itensor:.*]] = constant <i32: {{\[}}[1, 2], [4, 5]]> : tile<2x2xi32>
   %c_itensor = constant <i32: [[1, 2], [4, 5]]> : !cuda_tile.tile<2x2xi32>
@@ -160,8 +192,17 @@ cuda_tile.module @kernels {
   // CHECK: print_tko "%f%f"
   print_tko "%f%f", %c5, %c5 : tile<bf16>, tile<bf16> -> !cuda_tile.token
 
+  // CHECK: print_tko "%f", %[[cf4_tensor]] : tile<2x2xf4E2M1FN>
+  print_tko "%f", %cf4_tensor : tile<2x2xf4E2M1FN> -> !cuda_tile.token
+
   // CHECK: print_tko "%%%%"
   print_tko "%%%%" -> !cuda_tile.token
+
+  // Token chaining with args - tests result token capture and reuse
+  // CHECK: %[[TOK3:.*]] = print_tko "val: %i", %[[c4_i32]] : tile<i32>
+  %tok3 = print_tko "val: %i", %c4_i32 : tile<i32> -> !cuda_tile.token
+  // CHECK: print_tko "next: %i", %[[c4_i32]] token=%[[TOK3]] : tile<i32>
+  print_tko "next: %i", %c4_i32 token = %tok3 : tile<i32> -> !cuda_tile.token
 
   // CHECK: addi %[[c42_i16]], %[[c42_i16]] : tile<i16>
   %addi = addi %c42_i16, %c42_i16 : tile<i16>
@@ -271,12 +312,26 @@ cuda_tile.module @kernels {
   %negi1 = negi %c42_i16 : tile<i16>
   // CHECK: negi %[[c42_i16]] overflow<no_signed_wrap> : tile<i16>
   %negi2 = negi %c42_i16 overflow<no_signed_wrap> : tile<i16>
+  // CHECK: negi %[[c42]] : tile<i8>
+  %negi3 = negi %c42 : tile<i8>
+  // CHECK: negi %[[c4_i32]] overflow<no_signed_wrap> : tile<i32>
+  %negi4 = negi %c4_i32 overflow<no_signed_wrap> : tile<i32>
+  // CHECK: negi %[[c4_i64]] : tile<i64>
+  %negi5 = negi %c4_i64 : tile<i64>
+  // CHECK: negi %[[c_itensor]] : tile<2x2xi32>
+  %negi6 = negi %c_itensor : tile<2x2xi32>
 
   // CHECK: exp2 %[[c_tensor]] : tile<2x2xf32>
   %exp2 = exp2 %c_tensor : tile<2x2xf32>
 
   // CHECK: exp2 %[[c_tensor]] flush_to_zero : tile<2x2xf32>
   %exp2_1 = exp2 %c_tensor flush_to_zero : tile<2x2xf32>
+
+  // CHECK: exp %[[c_tensor]] : tile<2x2xf32>
+  %exp = exp %c_tensor : tile<2x2xf32>
+
+  // CHECK: exp %[[c_tensor]] rounding<approx> : tile<2x2xf32>
+  %exp_approx = exp %c_tensor rounding<approx> : tile<2x2xf32>
 
   // CHECK: reshape %[[c42]] : tile<i8> -> tile<1xi8>
   %c_tensor_42 = reshape %c42 : tile<i8> -> tile<1xi8>
@@ -321,6 +376,18 @@ cuda_tile.module @kernels {
   %trunci4 = trunci %c42_i16 overflow<no_wrap> : tile<i16> -> tile<i8>
   // CHECK: trunci %[[c42_i16]] : tile<i16> -> tile<i8>
   %trunci5 = trunci %c42_i16 overflow<none> : tile<i16> -> tile<i8>
+
+  // i4 trunci/exti round-trip
+  // CHECK: trunci %[[c42_i16]] : tile<i16> -> tile<i4>
+  %trunci_i4 = trunci %c42_i16 : tile<i16> -> tile<i4>
+  // CHECK: trunci %[[c42_i16]] overflow<no_wrap> : tile<i16> -> tile<i4>
+  %trunci_i4_nw = trunci %c42_i16 overflow<no_wrap> : tile<i16> -> tile<i4>
+  // CHECK: exti %{{.+}} signed : tile<i4> -> tile<i8>
+  %exti_i4_s = exti %trunci_i4 signed : tile<i4> -> tile<i8>
+  // CHECK: exti %{{.+}} unsigned : tile<i4> -> tile<i16>
+  %exti_i4_u = exti %trunci_i4 unsigned : tile<i4> -> tile<i16>
+  // CHECK: exti %{{.+}} signed : tile<i4> -> tile<i32>
+  %exti_i4_i32 = exti %trunci_i4 signed : tile<i4> -> tile<i32>
   }
 
   // CHECK: entry @entry_early_exit
@@ -370,6 +437,43 @@ cuda_tile.module @kernels {
   testing$func @extract(%t: !cuda_tile.tile<8xf32>, %idx: !cuda_tile.tile<i32>) {
     // CHECK: extract %{{.*}}[%{{.*}}] : tile<8xf32> -> tile<4xf32>
     %0 = extract %t[%idx] : tile<8xf32> -> tile<4xf32>
+  }
+
+  // CHECK-LABEL: extract_1d
+  testing$func @extract_1d(%arg0: !cuda_tile.tile<8xf32>) {
+    %c0 = constant <i32: 0> : tile<i32>
+    // CHECK: extract %{{.+}}[%{{.+}}] : tile<8xf32> -> tile<4xf32>
+    %0 = extract %arg0[%c0] : tile<8xf32> -> tile<4xf32>
+  }
+
+  // CHECK-LABEL: extract_2d
+  testing$func @extract_2d(%arg0: !cuda_tile.tile<4x8xf32>) {
+    %c0 = constant <i32: 0> : tile<i32>
+    %c1 = constant <i32: 1> : tile<i32>
+    // CHECK: extract %{{.+}}[%{{.+}}, %{{.+}}] : tile<4x8xf32> -> tile<2x4xf32>
+    %0 = extract %arg0[%c0, %c1] : tile<4x8xf32> -> tile<2x4xf32>
+  }
+
+  // CHECK-LABEL: extract_3d
+  testing$func @extract_3d(%arg0: !cuda_tile.tile<8x4x16xf32>) {
+    %c0 = constant <i32: 0> : tile<i32>
+    %c1 = constant <i32: 1> : tile<i32>
+    %c2 = constant <i32: 0> : tile<i32>
+    // CHECK: extract %{{.+}}[%{{.+}}, %{{.+}}, %{{.+}}] : tile<8x4x16xf32> -> tile<4x2x8xf32>
+    %0 = extract %arg0[%c0, %c1, %c2] : tile<8x4x16xf32> -> tile<4x2x8xf32>
+  }
+
+  // CHECK-LABEL: extract_scalar
+  testing$func @extract_scalar(%arg0: !cuda_tile.tile<f32>) {
+    // CHECK: extract %{{.+}}[] : tile<f32> -> tile<f32>
+    %0 = extract %arg0[] : tile<f32> -> tile<f32>
+  }
+
+  // CHECK-LABEL: extract_boundary_valid
+  testing$func @extract_boundary_valid(%arg0: !cuda_tile.tile<8xf32>) {
+    %boundary_idx = constant <i32: 1> : tile<i32>
+    // CHECK: extract %{{.+}}[%{{.+}}] : tile<8xf32> -> tile<4xf32>
+    %0 = extract %arg0[%boundary_idx] : tile<8xf32> -> tile<4xf32>
   }
   
   // CHECK-LABEL: add_ptr_i8
@@ -450,6 +554,19 @@ cuda_tile.module @kernels {
 
     // CHECK: make_tensor_view %[[BASE]], shape = [%[[CI1]], 32], strides = [%[[CI1]], 1] : tile<i1> -> tensor_view<?x32xf32, strides=[?,1]>
     make_tensor_view %base, shape = [%ci1, 32], strides = [%ci1, 1] : tile<i1> -> tensor_view<?x32xf32, strides=[?,1]>
+  }
+
+  // CHECK-LABEL: make_tensor_view_f4e2m1fn
+  // CHECK-SAME: (%[[BASE:.+]]: tile<ptr<f4E2M1FN>>)
+  testing$func @make_tensor_view_f4e2m1fn(%base: !cuda_tile.tile<!cuda_tile.ptr<f4E2M1FN>>) {
+    // CHECK: make_tensor_view %[[BASE]], shape = [32, 32], strides = [32, 1] : tensor_view<32x32xf4E2M1FN, strides=[32,1]>
+    make_tensor_view %base, shape = [32, 32], strides = [32, 1] : tensor_view<32x32xf4E2M1FN, strides=[32,1]>
+
+    // CHECK: make_tensor_view %[[BASE]], shape = [32, 32], strides = [1, 32] : tensor_view<32x32xf4E2M1FN, strides=[1,32]>
+    make_tensor_view %base, shape = [32, 32], strides = [1, 32] : tensor_view<32x32xf4E2M1FN, strides=[1,32]>
+
+    // CHECK: make_tensor_view %[[BASE]], shape = [1, 32], strides = [32, 1] : tensor_view<1x32xf4E2M1FN, strides=[32,1]>
+    make_tensor_view %base, shape = [1, 32], strides = [32, 1] : tensor_view<1x32xf4E2M1FN, strides=[32,1]>
   }
 
   // CHECK-LABEL: get_tensor_shape
@@ -586,6 +703,12 @@ cuda_tile.module @kernels {
     %0 = mmaf %arg0, %arg1, %arg2 : tile<4x8xf32>, tile<8x16xf32>, tile<4x16xf32>
   }
 
+  // CHECK-LABEL: @mma1_fast_accum
+  testing$func @mma1_fast_accum(%arg0: !cuda_tile.tile<4x8xf8E4M3FN>, %arg1: !cuda_tile.tile<8x16xf8E4M3FN>, %arg2: !cuda_tile.tile<4x16xf32>) {
+    // CHECK: %{{.+}} = mmaf %{{.+}}, %{{.+}}, %{{.+}} fast_acc : tile<4x8xf8E4M3FN>, tile<8x16xf8E4M3FN>, tile<4x16xf32>
+    %0 = mmaf %arg0, %arg1, %arg2 fast_acc : tile<4x8xf8E4M3FN>, tile<8x16xf8E4M3FN>, tile<4x16xf32>
+  }
+
   // CHECK-LABEL: @mma2
   testing$func @mma2(%arg0: !cuda_tile.tile<4x8xi8>, %arg1: !cuda_tile.tile<8x16xi8>, %arg2: !cuda_tile.tile<4x16xi32>) {
     // CHECK: %{{.+}} = mmai %{{.+}}, %{{.+}}, %{{.+}} signed signed : tile<4x8xi8>, tile<8x16xi8>, tile<4x16xi32>
@@ -602,6 +725,102 @@ cuda_tile.module @kernels {
   testing$func @mma4(%arg0: !cuda_tile.tile<2x4x8xi8>, %arg1: !cuda_tile.tile<2x8x16xi8>, %arg2: !cuda_tile.tile<2x4x16xi32>) {
     // CHECK: %{{.+}} = mmai %{{.+}}, %{{.+}}, %{{.+}} unsigned unsigned : tile<2x4x8xi8>, tile<2x8x16xi8>, tile<2x4x16xi32>
     %0 = mmai %arg0, %arg1, %arg2 unsigned unsigned : tile<2x4x8xi8>, tile<2x8x16xi8>, tile<2x4x16xi32>
+  }
+
+  // CHECK-LABEL: test_mmaf_scaled_fp8e5m2
+  // CHECK-SAME: (%[[LHS:.+]]: tile<128x128xf8E5M2>, %[[RHS:.+]]: tile<128x128xf8E5M2>, %[[ACC:.+]]: tile<128x128xf32>, %[[LHS_SCALE:.+]]: tile<128x4xf8E8M0FNU>, %[[RHS_SCALE:.+]]: tile<4x128xf8E8M0FNU>)
+  testing$func @test_mmaf_scaled_fp8e5m2(%lhs: !cuda_tile.tile<128x128xf8E5M2>, %rhs: !cuda_tile.tile<128x128xf8E5M2>, %acc: !cuda_tile.tile<128x128xf32>, %lhs_scale: !cuda_tile.tile<128x4xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<4x128xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled %[[LHS]], %[[RHS]], %[[ACC]], %[[LHS_SCALE]], %[[RHS_SCALE]] : tile<128x128xf8E5M2>, tile<128x128xf8E5M2>, tile<128x128xf32>, tile<128x4xf8E8M0FNU>, tile<4x128xf8E8M0FNU>
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x128xf8E5M2>, !cuda_tile.tile<128x128xf8E5M2>, !cuda_tile.tile<128x128xf32>, !cuda_tile.tile<128x4xf8E8M0FNU>, !cuda_tile.tile<4x128xf8E8M0FNU>
+  }
+
+  // CHECK-LABEL: test_mmaf_scaled_fp8e4m3
+  // CHECK-SAME: (%[[LHS:.+]]: tile<128x128xf8E4M3FN>, %[[RHS:.+]]: tile<128x128xf8E4M3FN>, %[[ACC:.+]]: tile<128x128xf32>, %[[LHS_SCALE:.+]]: tile<128x4xf8E8M0FNU>, %[[RHS_SCALE:.+]]: tile<4x128xf8E8M0FNU>)
+  testing$func @test_mmaf_scaled_fp8e4m3(%lhs: !cuda_tile.tile<128x128xf8E4M3FN>, %rhs: !cuda_tile.tile<128x128xf8E4M3FN>, %acc: !cuda_tile.tile<128x128xf32>, %lhs_scale: !cuda_tile.tile<128x4xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<4x128xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled %[[LHS]], %[[RHS]], %[[ACC]], %[[LHS_SCALE]], %[[RHS_SCALE]] : tile<128x128xf8E4M3FN>, tile<128x128xf8E4M3FN>, tile<128x128xf32>, tile<128x4xf8E8M0FNU>, tile<4x128xf8E8M0FNU>
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x128xf8E4M3FN>, !cuda_tile.tile<128x128xf8E4M3FN>, !cuda_tile.tile<128x128xf32>, !cuda_tile.tile<128x4xf8E8M0FNU>, !cuda_tile.tile<4x128xf8E8M0FNU>
+  }
+
+  // CHECK-LABEL: test_mmaf_scaled_mxfp4
+  // CHECK-SAME: (%[[LHS:.+]]: tile<128x128xf4E2M1FN>, %[[RHS:.+]]: tile<128x128xf4E2M1FN>, %[[ACC:.+]]: tile<128x128xf32>, %[[LHS_SCALE:.+]]: tile<128x4xf8E8M0FNU>, %[[RHS_SCALE:.+]]: tile<4x128xf8E8M0FNU>)
+  testing$func @test_mmaf_scaled_mxfp4(%lhs: !cuda_tile.tile<128x128xf4E2M1FN>, %rhs: !cuda_tile.tile<128x128xf4E2M1FN>, %acc: !cuda_tile.tile<128x128xf32>, %lhs_scale: !cuda_tile.tile<128x4xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<4x128xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled %[[LHS]], %[[RHS]], %[[ACC]], %[[LHS_SCALE]], %[[RHS_SCALE]] : tile<128x128xf4E2M1FN>, tile<128x128xf4E2M1FN>, tile<128x128xf32>, tile<128x4xf8E8M0FNU>, tile<4x128xf8E8M0FNU>
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf32>, !cuda_tile.tile<128x4xf8E8M0FNU>, !cuda_tile.tile<4x128xf8E8M0FNU>
+  }
+
+  // CHECK-LABEL: test_mmaf_scaled_mxfp4_vec16
+  // CHECK-SAME: (%[[LHS:.+]]: tile<128x128xf4E2M1FN>, %[[RHS:.+]]: tile<128x128xf4E2M1FN>, %[[ACC:.+]]: tile<128x128xf32>, %[[LHS_SCALE:.+]]: tile<128x8xf8E8M0FNU>, %[[RHS_SCALE:.+]]: tile<8x128xf8E8M0FNU>)
+  testing$func @test_mmaf_scaled_mxfp4_vec16(%lhs: !cuda_tile.tile<128x128xf4E2M1FN>, %rhs: !cuda_tile.tile<128x128xf4E2M1FN>, %acc: !cuda_tile.tile<128x128xf32>, %lhs_scale: !cuda_tile.tile<128x8xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<8x128xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled %[[LHS]], %[[RHS]], %[[ACC]], %[[LHS_SCALE]], %[[RHS_SCALE]] : tile<128x128xf4E2M1FN>, tile<128x128xf4E2M1FN>, tile<128x128xf32>, tile<128x8xf8E8M0FNU>, tile<8x128xf8E8M0FNU>
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf32>, !cuda_tile.tile<128x8xf8E8M0FNU>, !cuda_tile.tile<8x128xf8E8M0FNU>
+  }
+
+  // CHECK-LABEL: test_mmaf_scaled_nvfp4
+  // CHECK-SAME: (%[[LHS:.+]]: tile<128x128xf4E2M1FN>, %[[RHS:.+]]: tile<128x128xf4E2M1FN>, %[[ACC:.+]]: tile<128x128xf32>, %[[LHS_SCALE:.+]]: tile<128x8xf8E4M3FN>, %[[RHS_SCALE:.+]]: tile<8x128xf8E4M3FN>)
+  testing$func @test_mmaf_scaled_nvfp4_f4e2m1_f8e4m3(%lhs: !cuda_tile.tile<128x128xf4E2M1FN>, %rhs: !cuda_tile.tile<128x128xf4E2M1FN>, %acc: !cuda_tile.tile<128x128xf32>, %lhs_scale: !cuda_tile.tile<128x8xf8E4M3FN>, %rhs_scale: !cuda_tile.tile<8x128xf8E4M3FN>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled %[[LHS]], %[[RHS]], %[[ACC]], %[[LHS_SCALE]], %[[RHS_SCALE]] : tile<128x128xf4E2M1FN>, tile<128x128xf4E2M1FN>, tile<128x128xf32>, tile<128x8xf8E4M3FN>, tile<8x128xf8E4M3FN>
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf4E2M1FN>, !cuda_tile.tile<128x128xf32>, !cuda_tile.tile<128x8xf8E4M3FN>, !cuda_tile.tile<8x128xf8E4M3FN>
+  }
+
+  // mmaf_scaled with 64x64 size (mxfp4)
+  // CHECK-LABEL: test_mmaf_scaled_mxfp4_64x64
+  testing$func @test_mmaf_scaled_mxfp4_64x64(%lhs: !cuda_tile.tile<64x64xf4E2M1FN>, %rhs: !cuda_tile.tile<64x64xf4E2M1FN>, %acc: !cuda_tile.tile<64x64xf32>, %lhs_scale: !cuda_tile.tile<64x2xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<2x64xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<64x64xf4E2M1FN>, !cuda_tile.tile<64x64xf4E2M1FN>, !cuda_tile.tile<64x64xf32>, !cuda_tile.tile<64x2xf8E8M0FNU>, !cuda_tile.tile<2x64xf8E8M0FNU>
+  }
+
+  // mmaf_scaled with non-square shapes (mxfp4)
+  // CHECK-LABEL: test_mmaf_scaled_mxfp4_nonsquare
+  testing$func @test_mmaf_scaled_mxfp4_nonsquare(%lhs: !cuda_tile.tile<128x64xf4E2M1FN>, %rhs: !cuda_tile.tile<64x256xf4E2M1FN>, %acc: !cuda_tile.tile<128x256xf32>, %lhs_scale: !cuda_tile.tile<128x2xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<2x256xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<128x64xf4E2M1FN>, !cuda_tile.tile<64x256xf4E2M1FN>, !cuda_tile.tile<128x256xf32>, !cuda_tile.tile<128x2xf8E8M0FNU>, !cuda_tile.tile<2x256xf8E8M0FNU>
+  }
+
+  // mmaf_scaled with batched (3D) tensors (mxfp4)
+  // CHECK-LABEL: test_mmaf_scaled_mxfp4_batched
+  testing$func @test_mmaf_scaled_mxfp4_batched(%lhs: !cuda_tile.tile<2x64x64xf4E2M1FN>, %rhs: !cuda_tile.tile<2x64x64xf4E2M1FN>, %acc: !cuda_tile.tile<2x64x64xf32>, %lhs_scale: !cuda_tile.tile<2x64x2xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<2x2x64xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<2x64x64xf4E2M1FN>, !cuda_tile.tile<2x64x64xf4E2M1FN>, !cuda_tile.tile<2x64x64xf32>, !cuda_tile.tile<2x64x2xf8E8M0FNU>, !cuda_tile.tile<2x2x64xf8E8M0FNU>
+  }
+
+  // mmaf_scaled f8E5M2 with 64x64 size
+  // CHECK-LABEL: test_mmaf_scaled_fp8e5m2_64x64
+  testing$func @test_mmaf_scaled_fp8e5m2_64x64(%lhs: !cuda_tile.tile<64x64xf8E5M2>, %rhs: !cuda_tile.tile<64x64xf8E5M2>, %acc: !cuda_tile.tile<64x64xf32>, %lhs_scale: !cuda_tile.tile<64x2xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<2x64xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<64x64xf8E5M2>, !cuda_tile.tile<64x64xf8E5M2>, !cuda_tile.tile<64x64xf32>, !cuda_tile.tile<64x2xf8E8M0FNU>, !cuda_tile.tile<2x64xf8E8M0FNU>
+  }
+
+  // mmaf_scaled f8E4M3FN with 64x64 size
+  // CHECK-LABEL: test_mmaf_scaled_fp8e4m3_64x64
+  testing$func @test_mmaf_scaled_fp8e4m3_64x64(%lhs: !cuda_tile.tile<64x64xf8E4M3FN>, %rhs: !cuda_tile.tile<64x64xf8E4M3FN>, %acc: !cuda_tile.tile<64x64xf32>, %lhs_scale: !cuda_tile.tile<64x2xf8E8M0FNU>, %rhs_scale: !cuda_tile.tile<2x64xf8E8M0FNU>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<64x64xf8E4M3FN>, !cuda_tile.tile<64x64xf8E4M3FN>, !cuda_tile.tile<64x64xf32>, !cuda_tile.tile<64x2xf8E8M0FNU>, !cuda_tile.tile<2x64xf8E8M0FNU>
+  }
+
+  // mmaf_scaled nvfp4 with 64x64 size (f4E2M1FN + f8E4M3FN scale)
+  // CHECK-LABEL: test_mmaf_scaled_nvfp4_64x64
+  testing$func @test_mmaf_scaled_nvfp4_64x64(%lhs: !cuda_tile.tile<64x64xf4E2M1FN>, %rhs: !cuda_tile.tile<64x64xf4E2M1FN>, %acc: !cuda_tile.tile<64x64xf32>, %lhs_scale: !cuda_tile.tile<64x4xf8E4M3FN>, %rhs_scale: !cuda_tile.tile<4x64xf8E4M3FN>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<64x64xf4E2M1FN>, !cuda_tile.tile<64x64xf4E2M1FN>, !cuda_tile.tile<64x64xf32>, !cuda_tile.tile<64x4xf8E4M3FN>, !cuda_tile.tile<4x64xf8E4M3FN>
+  }
+
+  // mmaf_scaled nvfp4 batched (3D) (f4E2M1FN + f8E4M3FN scale)
+  // CHECK-LABEL: test_mmaf_scaled_nvfp4_batched
+  testing$func @test_mmaf_scaled_nvfp4_batched(%lhs: !cuda_tile.tile<2x64x64xf4E2M1FN>, %rhs: !cuda_tile.tile<2x64x64xf4E2M1FN>, %acc: !cuda_tile.tile<2x64x64xf32>, %lhs_scale: !cuda_tile.tile<2x64x4xf8E4M3FN>, %rhs_scale: !cuda_tile.tile<2x4x64xf8E4M3FN>
+  ) {
+    // CHECK: %{{.+}} = mmaf_scaled
+    %0 = mmaf_scaled %lhs, %rhs, %acc, %lhs_scale, %rhs_scale : !cuda_tile.tile<2x64x64xf4E2M1FN>, !cuda_tile.tile<2x64x64xf4E2M1FN>, !cuda_tile.tile<2x64x64xf32>, !cuda_tile.tile<2x64x4xf8E4M3FN>, !cuda_tile.tile<2x4x64xf8E4M3FN>
   }
 
   // CHECK-LABEL: concat
@@ -778,6 +997,8 @@ cuda_tile.module @kernels {
     %0 = exp %arg0 : tile<2xf16>
     // CHECK: exp %{{.+}} : tile<2xf32>
     %1 = exp %arg1 : tile<2xf32>
+    // CHECK: exp %{{.+}} rounding<approx> : tile<2xf32>
+    %approx1 = exp %arg1 rounding<approx> : tile<2xf32>
     // CHECK: exp %{{.+}} : tile<2xf64>
     %2 = exp %arg2 : tile<2xf64>
     // CHECK: exp %{{.+}} : tile<2xbf16>
@@ -1040,6 +1261,13 @@ cuda_tile.module @kernels {
           : tile<2xptr<f16>>, tile<2xf16> -> tile<2xf16>, token
   }
 
+  testing$func @test_atomic_rmw_bf16(%arg0: !cuda_tile.tile<2x!cuda_tile.ptr<bf16>>,
+                        %arg1: !cuda_tile.tile<2xbf16>) {
+      // CHECK: atomic_rmw_tko relaxed device %{{.+}}, addf, %{{.+}}
+      atomic_rmw_tko relaxed device %arg0, addf, %arg1
+          : tile<2xptr<bf16>>, tile<2xbf16> -> tile<2xbf16>, token
+  }
+
   testing$func @kernel_atan2(%x32: !cuda_tile.tile<2xf32>,
                              %y32: !cuda_tile.tile<2xf32>,
                              %x64: !cuda_tile.tile<2xf64>,
@@ -1057,4 +1285,128 @@ cuda_tile.module @kernels {
     // CHECK: %{{.+}} = atan2 %{{.+}}, %{{.+}} : tile<2xbf16>
     %r3 = atan2 %xbf16, %ybf16 : tile<2xbf16>
   }
+
+  // Test atan2 with scalar tiles (rank 0)
+  testing$func @kernel_atan2_scalar(%x32: !cuda_tile.tile<f32>,
+                                    %y32: !cuda_tile.tile<f32>,
+                                    %x64: !cuda_tile.tile<f64>,
+                                    %y64: !cuda_tile.tile<f64>,
+                                    %x16: !cuda_tile.tile<f16>,
+                                    %y16: !cuda_tile.tile<f16>,
+                                    %xbf16: !cuda_tile.tile<bf16>,
+                                    %ybf16: !cuda_tile.tile<bf16>) {
+    // CHECK: %{{.+}} = atan2 %{{.+}}, %{{.+}} : tile<f32>
+    %r0 = atan2 %x32, %y32 : tile<f32>
+    // CHECK: %{{.+}} = atan2 %{{.+}}, %{{.+}} : tile<f64>
+    %r1 = atan2 %x64, %y64 : tile<f64>
+    // CHECK: %{{.+}} = atan2 %{{.+}}, %{{.+}} : tile<f16>
+    %r2 = atan2 %x16, %y16 : tile<f16>
+    // CHECK: %{{.+}} = atan2 %{{.+}}, %{{.+}} : tile<bf16>
+    %r3 = atan2 %xbf16, %ybf16 : tile<bf16>
+  }
+
+  testing$func @test_unpack_op(%arg0: !cuda_tile.tile<64xi8>) {
+    // CHECK: unpack %{{.+}} : tile<64xi8> -> tile<512xi1>
+    %i1 = unpack %arg0 : tile<64xi8> -> tile<512xi1>
+    // CHECK: unpack %{{.+}} : tile<64xi8> -> tile<128xi4>
+    %i4 = unpack %arg0 : tile<64xi8> -> tile<128xi4>
+    // CHECK: unpack %{{.+}} : tile<64xi8> -> tile<128xf4E2M1FN>
+    %0 = unpack %arg0 : tile<64xi8> -> tile<128xf4E2M1FN>
+  }
+
+  testing$func @test_pack_op(%arg_i1: !cuda_tile.tile<16xi1>, %arg_i4: !cuda_tile.tile<64xi4>, %arg_i16: !cuda_tile.tile<64xi16>, %arg_f32: !cuda_tile.tile<64xf32>) {
+    // CHECK: pack %{{.+}} : tile<16xi1> -> tile<2xi8>
+    %i1 = pack %arg_i1 : tile<16xi1> -> tile<2xi8>
+    // CHECK: pack %{{.+}} : tile<64xi4> -> tile<32xi8>
+    %i4 = pack %arg_i4 : tile<64xi4> -> tile<32xi8>
+    // CHECK: pack %{{.+}} : tile<64xi16> -> tile<128xi8>
+    %0 = pack %arg_i16 : tile<64xi16> -> tile<128xi8>
+    // CHECK: pack %{{.+}} : tile<64xf32> -> tile<256xi8>
+    %1 = pack %arg_f32 : tile<64xf32> -> tile<256xi8>
+  }
+
+  // CHECK-LABEL: test_alloca_private
+  entry @test_alloca_private() {
+    // CHECK: alloca num_elem = 64, alignment = 16 : tile<ptr<f32>>
+    %0 = alloca num_elem = 64, alignment = 16 : tile<ptr<f32>>
+  }
+
+  // CHECK-LABEL: test_alloca_global
+  entry @test_alloca_global() {
+    // CHECK: alloca num_elem = 64, alignment = 16 global : tile<ptr<f32>>
+    %0 = alloca num_elem = 64, alignment = 16 global : tile<ptr<f32>>
+  }
+
+  // ===== atomic_red_view_tko tests =====
+  // Note: atomic_red_view_tko requires explicit memory ordering semantics (only RELAXED supported)
+  // to enable TMA REDG optimization on Hopper+ GPUs.
+  
+  testing$func @test_atomic_red_view_tko_basic(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<2x2xi32, strides=[2, 1]>>,
+      %value: !cuda_tile.tile<2x2xi32>) {
+    %c0 = constant <i32: 0> : !cuda_tile.tile<i32>
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], add, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t = atomic_red_view_tko relaxed device %view[%c0, %c0], add, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+  }
+
+  testing$func @test_atomic_red_view_tko_all_modes(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<2x2xi32, strides=[2, 1]>>,
+      %value: !cuda_tile.tile<2x2xi32>) {
+    %c0 = constant <i32: 0> : !cuda_tile.tile<i32>
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], and, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t0 = atomic_red_view_tko relaxed device %view[%c0, %c0], and, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], or, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t1 = atomic_red_view_tko relaxed device %view[%c0, %c0], or, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], xor, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t2 = atomic_red_view_tko relaxed device %view[%c0, %c0], xor, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], add, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t3 = atomic_red_view_tko relaxed device %view[%c0, %c0], add, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], max, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t4 = atomic_red_view_tko relaxed device %view[%c0, %c0], max, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], min, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t5 = atomic_red_view_tko relaxed device %view[%c0, %c0], min, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], umax, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t6 = atomic_red_view_tko relaxed device %view[%c0, %c0], umax, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], umin, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t7 = atomic_red_view_tko relaxed device %view[%c0, %c0], umin, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+  }
+
+  testing$func @test_atomic_red_view_tko_float(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<2x2xf32, strides=[2, 1]>>,
+      %value: !cuda_tile.tile<2x2xf32>) {
+    %c0 = constant <i32: 0> : !cuda_tile.tile<i32>
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], addf, %{{.+}} : tile<2x2xf32>, partition_view<tile=(2x2), tensor_view<2x2xf32, strides=[2,1]>>, tile<i32> -> token
+    %t = atomic_red_view_tko relaxed device %view[%c0, %c0], addf, %value
+        : tile<2x2xf32>, partition_view<tile=(2x2), tensor_view<2x2xf32, strides=[2, 1]>>, tile<i32> -> token
+  }
+
+  testing$func @test_atomic_red_view_tko_with_token(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<2x2xi32, strides=[2, 1]>>,
+      %value: !cuda_tile.tile<2x2xi32>,
+      %in_token: !cuda_tile.token) {
+    %c0 = constant <i32: 0> : !cuda_tile.tile<i32>
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], add, %{{.+}} token = %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2,1]>>, tile<i32> -> token
+    %t = atomic_red_view_tko relaxed device %view[%c0, %c0], add, %value token = %in_token
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
+  }
+
+  testing$func @test_atomic_red_view_tko_nonzero_index(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<4x4xi32, strides=[4, 1]>>,
+      %value: !cuda_tile.tile<2x2xi32>) {
+    %c1 = constant <i32: 1> : !cuda_tile.tile<i32>
+    %c2 = constant <i32: 2> : !cuda_tile.tile<i32>
+    // CHECK: %{{.+}} = atomic_red_view_tko relaxed device %{{.+}}[%{{.+}}, %{{.+}}], add, %{{.+}} : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<4x4xi32, strides=[4,1]>>, tile<i32> -> token
+    %t = atomic_red_view_tko relaxed device %view[%c1, %c2], add, %value
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<4x4xi32, strides=[4, 1]>>, tile<i32> -> token
+  }
+
 } // end module

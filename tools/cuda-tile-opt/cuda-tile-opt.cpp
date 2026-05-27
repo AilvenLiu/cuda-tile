@@ -12,16 +12,47 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/Support/CommandLine.h"
+
 #include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
 
-int main(int argc, char **argv) {
-  mlir::DialectRegistry registry;
+#ifdef CUDA_TILE_ENABLE_TESTING
+namespace mlir::cuda_tile::test {
+void registerTransformsUtilsTestPasses();
+} // namespace mlir::cuda_tile::test
+#endif // CUDA_TILE_ENABLE_TESTING
 
+int main(int argc, char **argv) {
+  // Command line options for hint diagnostics
+  static llvm::cl::opt<bool> warnUnsupportedHints(
+      "Wunsupported-hints",
+      llvm::cl::desc(
+          "Enable warnings for unsupported/invalid optimization hints"),
+      llvm::cl::init(false));
+
+  static llvm::cl::opt<bool> errorOnHints(
+      "Werr-hints",
+      llvm::cl::desc("Treat unsupported/invalid optimization hints as errors"),
+      llvm::cl::init(false));
+
+  mlir::DialectRegistry registry;
   registry.insert<mlir::cuda_tile::CudaTileDialect>();
+  // Add an extension to configure the dialect when it's loaded
+  registry.addExtension(
+      +[](mlir::MLIRContext *ctx, mlir::cuda_tile::CudaTileDialect *dialect) {
+        // Configure hint diagnostics based on command-line options
+        dialect->setWarnUnsupportedHints(warnUnsupportedHints);
+        dialect->setErrorOnHints(errorOnHints);
+      });
+
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerInlinerPass();
   mlir::cuda_tile::registerCudaTilePasses();
+
+#ifdef CUDA_TILE_ENABLE_TESTING
+  mlir::cuda_tile::test::registerTransformsUtilsTestPasses();
+#endif // CUDA_TILE_ENABLE_TESTING
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CudaTile test driver\n", registry));

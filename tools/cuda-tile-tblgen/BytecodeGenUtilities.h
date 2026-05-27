@@ -1,4 +1,4 @@
-//===- BytecodeGenUtilities.h -----------------------------------*- C++ -*-===//
+//===- BytecodeGenUtilities.h - Bytecode Gen Utilities ----------*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -25,6 +25,9 @@
 
 namespace mlir {
 namespace tblgen {
+
+/// Parse version string into major/minor components.
+std::pair<std::string, std::string> parseVersion(llvm::StringRef version);
 
 /// Extract version information from an attribute's TableGen metadata.
 std::pair<std::string, std::string>

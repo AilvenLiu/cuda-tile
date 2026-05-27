@@ -233,13 +233,13 @@ Save the following into a file `example.mlir`.
 ```
 cuda_tile.module @example_module {
     entry @example_kernel(%data_pr : tile<ptr<f32>>) {
-        print "Running example module\n"
+        print_tko "Running example module\n"
         %offsets = iota : tile<128xi32>
         %data_ptr_reshaped = reshape %data_pr : tile<ptr<f32>> -> tile<1xptr<f32>>
         %data_ptr_broadcasted = broadcast %data_ptr_reshaped : tile<1xptr<f32>> -> tile<128xptr<f32>>
         %data_ptr_tensor = offset %data_ptr_broadcasted, %offsets : tile<128xptr<f32>>, tile<128xi32> -> tile<128xptr<f32>>
         %data, %token = load_ptr_tko weak %data_ptr_tensor : tile<128xptr<f32>> -> tile<128xf32>, token
-        print "Data: %f\n", %data : tile<128xf32>
+        print_tko "Data: %f\n", %data : tile<128xf32>
         return
     }
 }
@@ -357,6 +357,49 @@ Tile open-source versioning scheme. In practice, toolkit patch releases (e.g.,
 13.1.0 → 13.1.1) rarely include new functional features and, therefore, should
 rarely require changes to the open-source components. If they ever do, those
 changes will be rolled into the next open-source patch release.
+
+## Keeping Compatibility with LLVM
+
+CUDA Tile IR requires LLVM at specific compatible commits. As upstream LLVM
+evolves, breaking changes may require fixes in CUDA Tile IR. We plan to release
+an independent fix for each LLVM breaking commit under a new version tag
+(e.g., `v13.1.1`, `v13.1.3`), creating compatibility intervals with LLVM.
+For example, the following CUDA Tile IR releases:
+
+```
+v13.1.0: [Release] CUDA Tile IR 13.1 - Initial open-source release (LLVM 81b576e66)
+v13.1.1: [LLVM-FIX] Breaking commit cfbb4cc3121 - 2025-10-31
+v13.1.3: [LLVM-FIX] Breaking commit 3d7018c70 - 2025-12-19
+```
+
+create the following compatibility intervals:
+
+| CUDA Tile IR Version | Compatible LLVM Range |
+|----------------------|-----------------------|
+| `v13.1.0` | [`81b576e66`, `cfbb4cc3121`)     |
+| `v13.1.1` | [`cfbb4cc3121`, `3d7018c70`)     |
+| `v13.1.3` | [`3d7018c70`, latest)            |
+
+**Note:** The most recent LLVM commits may introduce breaking
+changes that we haven't provided a fix for yet.
+
+### Determining the Correct CUDA Tile IR Version
+
+To find the appropriate CUDA Tile IR version for your LLVM commit, use the
+provided helper script:
+
+```bash
+./scripts/get-cuda-tile-version-for-llvm-hash.sh \
+  --cuda-tile-repo /path/to/cuda-tile \
+  --llvm-repo /path/to/llvm-project \
+  --llvm-commit <commit-hash>
+```
+
+**Note:** Make sure a stable LLVM commit is used. Unhealthy LLVM commits
+may break CUDA Tile IR in unexpected ways and are not taken into account
+by the script.
+
+
 
 ## Contributions and Support
 

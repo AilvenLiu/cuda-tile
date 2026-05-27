@@ -26,7 +26,9 @@ static OwningOpRef<Operation *> deserializeModule(llvm::StringRef bytecodeStr,
                                                   MLIRContext *context) {
   llvm::MemoryBufferRef bytecodeBufferRef(bytecodeStr,
                                           "deserializeModuleBuffer");
-  context->getOrLoadDialect<CudaTileDialect>();
+  auto dialect = context->getOrLoadDialect<CudaTileDialect>();
+  dialect->setWarnUnsupportedHints(getWarnUnsupportedHints());
+  dialect->setErrorOnHints(getErrorUnsupportedHints());
   return readBytecode(bytecodeBufferRef, *context);
 }
 
@@ -42,33 +44,37 @@ static void registerFromTileIRBytecodeTranslation() {
 //===----------------------------------------------------------------------===//
 // Serialization registration
 //===----------------------------------------------------------------------===//
+static FailureOr<cuda_tile::ModuleOp> getCudaTileModuleOp(Operation *op) {
+  cuda_tile::ModuleOp moduleOp = dyn_cast<cuda_tile::ModuleOp>(op);
+  if (moduleOp)
+    return moduleOp;
+  // Also support a CUDA Tile IR Module nested in a MLIR Module for convenience
+  // since the MLIR parse is adding one implicitly by default.
+  if (auto moduleOp = dyn_cast<mlir::ModuleOp>(op)) {
+    if (!llvm::hasSingleElement(*moduleOp.getBody()) ||
+        !llvm::isa<cuda_tile::ModuleOp>(moduleOp.getBody()->front())) {
+      return op->emitError(
+          "expected a single CUDA Tile IR module in the MLIR module");
+    }
+    return cast<cuda_tile::ModuleOp>(moduleOp.getBody()->front());
+  }
+  return op->emitError("expected a CUDA Tile IR module, but got a " +
+                       op->getName().getStringRef());
+}
 
 static void registerToTileIRBytecodeTranslation() {
   TranslateFromMLIRRegistration toBytecode(
       "mlir-to-cudatilebc", "Translate MLIR to CUDA Tile IR bytecode",
       [](Operation *op, raw_ostream &output) {
         BytecodeVersion targetVersion = getCurrentBytecodeVersion();
-        cuda_tile::ModuleOp moduleOp = dyn_cast<cuda_tile::ModuleOp>(op);
-        if (moduleOp)
-          return writeBytecode(output, moduleOp, targetVersion);
-
-        // Also support a CUDA Tile IR Module nested in a MLIR Module for
-        // convenience since the MLIR parse is adding one implicitly by default.
-        if (auto moduleOp = dyn_cast<mlir::ModuleOp>(op)) {
-          if (!llvm::hasSingleElement(*moduleOp.getBody()) ||
-              !llvm::isa<cuda_tile::ModuleOp>(moduleOp.getBody()->front())) {
-            op->emitError(
-                "expected a single CUDA Tile IR module in the MLIR module");
-            return failure();
-          }
-          return writeBytecode(
-              output, cast<cuda_tile::ModuleOp>(moduleOp.getBody()->front()),
-              targetVersion);
-        }
-
-        op->emitError("expected a CUDA Tile IR module, but got a " +
-                      op->getName().getStringRef());
-        return failure();
+        auto moduleOp = getCudaTileModuleOp(op);
+        if (failed(moduleOp))
+          return failure();
+        auto dialect =
+            cast<CudaTileDialect>(moduleOp->getOperation()->getDialect());
+        dialect->setWarnUnsupportedHints(getWarnUnsupportedHints());
+        dialect->setErrorOnHints(getErrorUnsupportedHints());
+        return writeBytecode(output, *moduleOp, targetVersion);
       },
       [](DialectRegistry &registry) { registry.insert<CudaTileDialect>(); });
 }
@@ -77,3 +83,4 @@ void mlir::cuda_tile::registerTileIRTranslations() {
   registerFromTileIRBytecodeTranslation();
   registerToTileIRBytecodeTranslation();
 }
+

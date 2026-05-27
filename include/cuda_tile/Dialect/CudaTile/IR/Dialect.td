@@ -48,9 +48,29 @@ def CudaTile_Dialect : Dialect {
       (addOperations<OpTys>(), ...);
     }
 
+    /// Get whether to emit diagnostics for unsupported/invalid optimization hints.
+    bool getWarnUnsupportedHints() const { return warnUnsupportedHints_; }
+
+    /// Set whether to emit diagnostics for unsupported/invalid optimization hints.
+    void setWarnUnsupportedHints(bool value) { warnUnsupportedHints_ = value; }
+
+    /// Get whether to treat unsupported/invalid hints as errors (vs warnings).
+    bool getErrorOnHints() const { return errorOnHints_; }
+
+    /// Set whether to treat unsupported/invalid hints as errors (vs warnings).
+    void setErrorOnHints(bool value) { errorOnHints_ = value; }
+
   private:
     void registerAttributes();
     void registerTypes();
+
+    /// Whether to emit diagnostics for unsupported/invalid optimization hints.
+    /// Default: false (silent).
+    bool warnUnsupportedHints_ = false;
+
+    /// Whether to treat unsupported/invalid hints as errors (requires warnUnsupportedHints_).
+    /// Default: false (warnings only).
+    bool errorOnHints_ = false;
   }];
 }
 
@@ -82,11 +102,17 @@ class CudaTileOpDef<string mnemonic, string version, string group, string subGro
 // Integer 32-bit Enum Attribute
 //===----------------------------------------------------------------------===//
 
-class CudaTileI32EnumAttrCase<string desc, string sym, int val, string str = sym> : I32EnumAttrCase<sym, val, str> {
+class CudaTileI32EnumAttrCase<string desc, string sym, int val, string version,
+                              string str = sym>
+    : I32EnumAttrCase<sym, val, str> {
   string description = desc;
+  string sinceVersion = version;
 }
 
-class CudaTileI32EnumAttr<string name, string desc, list<CudaTileI32EnumAttrCase> cases> : I32EnumAttr<name, desc, cases> {
+class CudaTileI32EnumAttr<string name, string desc, string version,
+                         list<CudaTileI32EnumAttrCase> cases>
+    : I32EnumAttr<name, desc, cases> {
+  string sinceVersion = version;
   string specPrefixDescription;
   string specSuffixDescription;
 }
@@ -95,11 +121,17 @@ class CudaTileI32EnumAttr<string name, string desc, list<CudaTileI32EnumAttrCase
 // Integer 64-bit Enum Attribute
 //===----------------------------------------------------------------------===//
 
-class CudaTileI64EnumAttrCase<string desc, string sym, int val, string str = sym> : I64EnumAttrCase<sym, val, str> {
+class CudaTileI64EnumAttrCase<string desc, string sym, int val, string version,
+                              string str = sym>
+    : I64EnumAttrCase<sym, val, str> {
   string description = desc;
+  string sinceVersion = version;
 }
 
-class CudaTileI64EnumAttr<string name, string desc, list<CudaTileI64EnumAttrCase> cases> : I64EnumAttr<name, desc, cases> {
+class CudaTileI64EnumAttr<string name, string desc, string version,
+                         list<CudaTileI64EnumAttrCase> cases>
+    : I64EnumAttr<name, desc, cases> {
+  string sinceVersion = version;
   string specPrefixDescription;
   string specSuffixDescription;
 }
@@ -108,20 +140,16 @@ class CudaTileEnumAttr<EnumAttrInfo enumInfo, string name = "",
                list <Trait> traits = []> : EnumAttr<CudaTile_Dialect, enumInfo, name, traits>;
 
 // Bitwise Arithmetic Operations
-class CudaTileBArithOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Arithmetic", "Bitwise", traits>;
+class CudaTileBitwiseOpDef<string mnemonic, string version, list<Trait> traits = []> :
+    CudaTileOpDef<mnemonic, version, "Bitwise", "", traits>;
 
 // Integer Arithmetic Operations
-class CudaTileIArithOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Arithmetic", "Integer", traits>;
+class CudaTileIntegerOpDef<string mnemonic, string version, list<Trait> traits = []> :
+    CudaTileOpDef<mnemonic, version, "Integer", "", traits>;
 
 // Floating Point Arithmetic Operations
-class CudaTileFArithOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Arithmetic", "Floating Point", traits>;
-
-// Miscellaneous Arithmetic Operations
-class CudaTileMiscArithOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Arithmetic", "Misc", traits>;
+class CudaTileFloatingPointOpDef<string mnemonic, string version, list<Trait> traits = []> :
+    CudaTileOpDef<mnemonic, version, "Floating Point", "", traits>;
 
 // Atomic Operations
 class CudaTileAtomicsOpDef<string mnemonic, string version, list<Trait> traits = []> :
@@ -139,10 +167,6 @@ class CudaTileCoreOpDef<string mnemonic, string version, list<Trait> traits = []
 class CudaTileControlFlowOpDef<string mnemonic, string version, list<Trait> traits = []> :
     CudaTileOpDef<mnemonic, version, "Control Flow", "", traits>;
 
-// Math Operations
-class CudaTileMathOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Math", "", traits>;
-
 // Memory Operations
 class CudaTileMemOpDef<string mnemonic, string version, list<Trait> traits = []> :
     CudaTileOpDef<mnemonic, version, "Memory", "", traits>;
@@ -150,10 +174,6 @@ class CudaTileMemOpDef<string mnemonic, string version, list<Trait> traits = []>
 // TensorView Operations
 class CudaTileViewOpDef<string mnemonic, string version, list<Trait> traits = []> :
     CudaTileOpDef<mnemonic, version, "Views", "", traits>;
-
-// Tile Operations
-class CudaTileTileOpDef<string mnemonic, string version, list<Trait> traits = []> :
-    CudaTileOpDef<mnemonic, version, "Tile", "", traits>;
 
 // Miscellaneous Operations
 class CudaTileMiscOpDef<string mnemonic, string version, list<Trait> traits = []> :
@@ -170,11 +190,14 @@ class CudaTileTestingOpDef<string mnemonic, string version, list<Trait> traits =
 //===----------------------------------------------------------------------===//
 
 class CudaTileTypeDef<string name, string _mnemonic, string _specName,
-                      list<Trait> traits = []>
+                      string version, list<Trait> traits = []>
   : TypeDef<CudaTile_Dialect, name, traits> {
 
   // The name used in the CUDA Tile IR spec to reference this type.
   string specName = _specName;
+
+  // Version when this type was introduced.
+  string sinceVersion = version;
 
   let mnemonic = _mnemonic;
 }
@@ -202,10 +225,48 @@ class CudaTileUnusedArg<Constraint constraint, string desc, string version, list
                 "present but not currently processed by CUDA Tile IR's specific logic.";
 }
 
-// The wrapper class for declaring attributes for CudaTile attributes.
-class CudaTileAttrDef<string attrName, string attrMnemonic, list<Trait> traits = []>
+// The wrapper for type-constrained parameters.
+// Uses multiple inheritance to be both a parameter and a constraint.
+// Inherits from AttrOrTypeParameter (so it can be used in parameters list)
+// and from TypeConstraint (to preserve validation and error messages).
+class CudaTileConstrainedTypeParam<Type typeConstraint, string version>
+  : AttrOrTypeParameter<typeConstraint.cppType, typeConstraint.summary>,
+    TypeConstraint<typeConstraint.predicate, typeConstraint.summary, typeConstraint.cppType> {
+  // Version when this parameter was introduced.
+  string sinceVersion = version;
+}
+
+// The wrapper for simple type parameters with version information.
+class CudaTileTypeParam<AttrOrTypeParameter param, string version>
+  : AttrOrTypeParameter<param.cppType, param.summary, param.cppAccessorType> {
+  // Version when this parameter was introduced.
+  string sinceVersion = version;
+
+  // Forward all fields from the base parameter.
+  let allocator = param.allocator;
+  let comparator = param.comparator;
+  let cppStorageType = param.cppStorageType;
+  let convertFromStorage = param.convertFromStorage;
+  let syntax = param.syntax;
+  let parser = param.parser;
+  let printer = param.printer;
+  let defaultValue = param.defaultValue;
+}
+
+// Convenience wrapper for string-based type parameters (avoids TypeParameter wrapper).
+class CudaTileStrTypeParam<string cppTypeStr, string desc, string version>
+  : CudaTileTypeParam<TypeParameter<cppTypeStr, desc>, version>;
+
+//===----------------------------------------------------------------------===//
+// Attribute Definitions
+//===----------------------------------------------------------------------===//
+
+class CudaTileAttrDef<string attrName, string attrMnemonic, string version,
+                      list<Trait> traits = []>
     : AttrDef<CudaTile_Dialect, attrName, traits> {
   let mnemonic = attrMnemonic;
+
+  string sinceVersion = version;
 
   list<string> mlirExamples = [];
 

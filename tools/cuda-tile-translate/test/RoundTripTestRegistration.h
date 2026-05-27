@@ -13,6 +13,7 @@
 namespace mlir {
 namespace cuda_tile {
 
+/// Register test-specific translations for round-trip testing.
 void registerTileIRTestTranslations();
 
 } // namespace cuda_tile

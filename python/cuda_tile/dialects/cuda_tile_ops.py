@@ -44,8 +44,20 @@ class _ElementType(metaclass=_ElementTypeMeta):
     pass
 
 
+class Boolean(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.IntegerType.get_signless(1))
+
+
+class Int4(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.IntegerType.get_signless(4))
+
+
 class Int8(_ElementType):
     _mlir_type_fn = staticmethod(lambda: _ods_ir.IntegerType.get_signless(8))
+
+
+class Int16(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.IntegerType.get_signless(16))
 
 
 class Int32(_ElementType):
@@ -82,6 +94,18 @@ class Float8E5M2(_ElementType):
 
 class Float8E4M3FN(_ElementType):
     _mlir_type_fn = staticmethod(lambda: _ods_ir.Float8E4M3FNType.get())
+
+
+class Float8E4M3FNUZ(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.Float8E4M3FNUZType.get())
+
+
+class Float8E8M0FNU(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.Float8E8M0FNUType.get())
+
+
+class Float4E2M1FN(_ElementType):
+    _mlir_type_fn = staticmethod(lambda: _ods_ir.Float4E2M1FNType.get())
 
 
 def _get_mlir_type(el_type):
@@ -136,6 +160,7 @@ from .._mlir_libs._cuda_tile import (
     TileType,
     TensorViewType,
     PartitionViewType,
+    StridedViewType,
     TokenType,
 )
 
@@ -154,6 +179,7 @@ from .._mlir_libs._cuda_tile import (
     SignednessAttr,
     ComparisonOrderingAttr,
     ComparisonPredicateAttr,
+    SymbolVisibilityAttr,
 )
 
 # =============================================================================
@@ -269,6 +295,19 @@ class ComparisonOrdering(Enum):
     UNORDERED = "unordered"
 
 
+class SymbolVisibility(Enum):
+    """
+    Enum for global symbol visibility.
+
+    Controls the visibility and optimization behavior of global variables:
+    - PUBLIC: Accessible from host code, never eliminated
+    - PRIVATE: Device-only access, enables aggressive optimization
+    """
+
+    PUBLIC = "public"
+    PRIVATE = "private"
+
+
 def get_atomic_rmw_mode_attr(
     mode: AtomicRMWMode, context: Optional[Context] = None
 ) -> AtomicRMWModeAttr:
@@ -312,6 +351,17 @@ def get_padding_value_attr(
     Convert an enum value to the corresponding PaddingValueAttr.
     """
     return PaddingValueAttr.get(padding_value.value, context)
+
+
+def get_symbol_visibility_attr(
+    visibility: SymbolVisibility, context: Optional[Context] = None
+) -> SymbolVisibilityAttr:
+    """
+    Convert an enum value to SymbolVisibilityAttr.
+    """
+    if context is None:
+        context = _ods_ir.Context.current
+    return SymbolVisibilityAttr.get(visibility.value, context)
 
 
 def get_memory_ordering_semantics_attr(
@@ -636,6 +686,156 @@ def get_supported_mma_configs():
 # =============================================================================
 
 
+# =============================================================================
+# MMA Scaled Configuration System
+# =============================================================================
+
+
+class MMAScaledConfig:
+    """Base class for scaled MMA configuration."""
+
+    def __init__(
+        self,
+        name: str,
+        operand_dtype,
+        scale_dtype,
+        acc_dtype=Float32,
+        scale_factor=None,
+    ):
+        self.name = name
+        self.operand_dtype = operand_dtype
+        self.scale_dtype = scale_dtype
+        self.acc_dtype = acc_dtype
+        # Default: 16 for e4m3 scale (4X / mxf4nvf4), 32 otherwise (2X / mxf4, mxf8f6f4)
+        if scale_factor is None:
+            scale_factor = 16 if scale_dtype == Float8E4M3FN else 32
+        self.scale_factor = scale_factor
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return f"MMAScaledConfig({self.name})"
+
+    def matches_types(self, operand_mlir_type, scale_mlir_type):
+        """Check if the given MLIR types match this configuration"""
+        operand_mlir_type_expected = _get_mlir_type(self.operand_dtype)
+        scale_mlir_type_expected = _get_mlir_type(self.scale_dtype)
+        return (
+            operand_mlir_type_expected == operand_mlir_type
+            and scale_mlir_type_expected == scale_mlir_type
+        )
+
+
+# Concrete MMA Scaled Configuration Classes
+# MXFP8 configurations: f8E8M0FNU scale with f8E5M2/f8E4M3FN operands
+class MMAScaledConfig_E5M2_E8M0(MMAScaledConfig):
+    """e5m2 operands with e8m0 scale -> f32 (mxfp8)"""
+
+    def __init__(self):
+        super().__init__(
+            name="e5m2+e8m0->f32",
+            operand_dtype=Float8E5M2,
+            scale_dtype=Float8E8M0FNU,
+        )
+
+
+class MMAScaledConfig_E4M3_E8M0(MMAScaledConfig):
+    """e4m3 operands with e8m0 scale -> f32 (mxfp8)"""
+
+    def __init__(self):
+        super().__init__(
+            name="e4m3+e8m0->f32",
+            operand_dtype=Float8E4M3FN,
+            scale_dtype=Float8E8M0FNU,
+        )
+
+
+# MXFP4 configuration: f8E8M0FNU scale with f4E2M1FN operands
+class MMAScaledConfig_E2M1_E8M0(MMAScaledConfig):
+    """e2m1 operands with e8m0 scale -> f32 (mxfp4)"""
+
+    def __init__(self):
+        super().__init__(
+            name="e2m1+e8m0->f32",
+            operand_dtype=Float4E2M1FN,
+            scale_dtype=Float8E8M0FNU,
+        )
+
+
+# NVFP4 configuration: f8E4M3FN scale with f4E2M1FN operands
+class MMAScaledConfig_E2M1_E4M3(MMAScaledConfig):
+    """e2m1 operands with e4m3 scale -> f32 (nvfp4)"""
+
+    def __init__(self):
+        super().__init__(
+            name="e2m1+e4m3->f32",
+            operand_dtype=Float4E2M1FN,
+            scale_dtype=Float8E4M3FN,
+        )
+
+
+# MXFP4 4X configuration: f8E8M0FNU scale with f4E2M1FN operands, vecSize=16 (mxf4nvf4)
+class MMAScaledConfig_E2M1_E8M0_4X(MMAScaledConfig):
+    """e2m1 operands with e8m0 scale, 4X mode -> f32 (mxf4nvf4)"""
+
+    def __init__(self):
+        super().__init__(
+            name="e2m1+e8m0(4X)->f32",
+            operand_dtype=Float4E2M1FN,
+            scale_dtype=Float8E8M0FNU,
+            scale_factor=16,
+        )
+
+
+# Registry of supported MMA Scaled configurations for caching
+_SUPPORTED_MMA_SCALED_CONFIGS = None
+
+
+def _initialize_mma_scaled_configs():
+    """Initialize MMA Scaled configurations using automatic subclass discovery"""
+    global _SUPPORTED_MMA_SCALED_CONFIGS
+    if _SUPPORTED_MMA_SCALED_CONFIGS is not None:
+        return _SUPPORTED_MMA_SCALED_CONFIGS
+
+    configs = []
+
+    try:
+        # Automatically discover all MMAScaledConfig subclasses
+        for config_class in MMAScaledConfig.__subclasses__():
+            try:
+                config = config_class()
+                configs.append(config)
+            except Exception:
+                continue
+
+    except Exception:
+        configs = []
+
+    _SUPPORTED_MMA_SCALED_CONFIGS = configs
+    return _SUPPORTED_MMA_SCALED_CONFIGS
+
+
+def find_mma_scaled_config(operand_mlir_type, scale_mlir_type):
+    """Find a matching MMA Scaled configuration for the given MLIR types"""
+    configs = _initialize_mma_scaled_configs()
+
+    for config in configs:
+        if config.matches_types(operand_mlir_type, scale_mlir_type):
+            return config
+    return None
+
+
+def get_supported_mma_scaled_configs():
+    """Get all supported MMA Scaled configurations"""
+    return _initialize_mma_scaled_configs()
+
+
+# =============================================================================
+# End MMA Scaled Configuration System
+# =============================================================================
+
+
 def _binary_op(lhs, rhs, op: str, predAtt="", is_reversed=False) -> "Tile":
     """Generate arithmatic binary operations."""
 
@@ -937,8 +1137,43 @@ class PartitionView(TileView):
         return self.view_type.dim_map
 
     @property
-    def masked(self):
-        return self.view_type.masked
+    def view_tile_type(self) -> TileType:
+        return TileType(self.view_type.view_tile_type)
+
+    @property
+    def view_index_rank(self) -> int:
+        return self.view_type.view_index_rank
+
+
+class StridedView(TileView):
+    """
+    A class representing a StridedView object with an associated type and
+    value. Inherits from _ods_ir.Value, and acts as a wrapper around an IR
+    value with a specified tile strided view type.
+    """
+
+    view_type: StridedViewType
+    value: _ods_ir.Value
+
+    def __init__(self, value: _ods_ir.Value, type: _ods_ir.Type):
+        view_type = StridedViewType(type)
+        if isinstance(value, _ods_ir.Value) is False:
+            raise Exception("StridedView value is not IR Value")
+        super().__init__(value)
+        self.view_type = view_type
+        self.value = value
+
+    @property
+    def tile_shape(self):
+        return self.view_type.tile_shape
+
+    @property
+    def tensor_view_type(self):
+        return self.view_type.tensor_view_type
+
+    @property
+    def dim_map(self):
+        return self.view_type.dim_map
 
     @property
     def view_tile_type(self) -> TileType:
@@ -1034,7 +1269,7 @@ def _index_list_to_tiles(index: List[Tile | int]) -> List[Tile]:
 
 def return_results(
     op,
-) -> Union[Tile, Tuple[Tile, ...], Tuple[Tile, Token], Token]:
+) -> Union[Tile, Tuple[Union[Tile, Token], ...], Tuple[Tile, Token], Token]:
     """
     Return op results as Tile(s), Token, or (Tile, Token) depending on context.
 
@@ -1060,24 +1295,18 @@ def return_results(
             raise ValueError(f"Failed to create result from single op result: {e}")
 
     elif len(results) >= 2:
-        # Try to handle (Tile, Token) case
+        # General case: return a tuple where each element is either a Tile or Token
         try:
-            result0_type = results[0].type
-            result1_type = results[1].type
-            if TileType.isinstance(result0_type) and TokenType.isinstance(result1_type):
-                tile = Tile(results[0], results[0].type)
-                token = Token(results[1])
-                return (tile, token)
-            else:
-                # Fall back to multiple tiles
-                tiles = []
-                for i, v in enumerate(results):
-                    result_type = v.type
-                    if TileType.isinstance(result_type):
-                        tiles.append(Tile(v, result_type))
-                    else:
-                        raise ValueError(f"Unsupported result type for result {i}")
-                return tuple(tiles)
+            converted: List[Union[Tile, Token]] = []
+            for i, v in enumerate(results):
+                result_type = v.type
+                if TileType.isinstance(result_type):
+                    converted.append(Tile(v, result_type))
+                elif TokenType.isinstance(result_type):
+                    converted.append(Token(v))
+                else:
+                    raise ValueError(f"Unsupported result type for result {i}")
+            return tuple(converted)
         except Exception as e:
             raise ValueError(f"Failed to process multiple results: {e}")
 
@@ -1094,6 +1323,11 @@ def return_tensor_view(op) -> TensorView:
 def return_partition_view(op) -> PartitionView:
     value = _get_op_result_or_op_results(op)
     return PartitionView(_get_op_result_or_op_results(op), value.type)
+
+
+def return_strided_view(op) -> StridedView:
+    value = _get_op_result_or_op_results(op)
+    return StridedView(_get_op_result_or_op_results(op), value.type)
 
 
 def _ensure_attr(value, type):
@@ -1132,15 +1366,38 @@ class _ConstantOp(_cuda_tile.ConstantOp):
 class _GlobalOp(_cuda_tile.GlobalOp):
     """Specialization for the global op class."""
 
-    def __init__(self, ty, sym_name, values, *, loc=None, ip=None):
+    def __init__(
+        self,
+        ty,
+        sym_name,
+        values,
+        *,
+        alignment=None,
+        symbol_visibility: SymbolVisibility | None = None,
+        constant: bool = False,
+        loc=None,
+        ip=None,
+    ):
         assert isinstance(ty, TileType), "expected tile type"
         el_ty = ty.element_type
         assert isinstance(
             el_ty, (_ods_ir.FloatType, _ods_ir.IntegerType)
         ), "expected integer or float element type"
         attrs = [_ensure_attr(v, el_ty) for v in values]
+
+        # Build keyword arguments
+        kwargs = {}
+        if alignment is not None:
+            kwargs["alignment"] = alignment
+        if symbol_visibility is not None:
+            # Convert enum to attribute using helper function
+            kwargs["symbol_visibility"] = get_symbol_visibility_attr(symbol_visibility)
+        if constant:
+            # UnitAttr is used for constant (present = true, absent = false)
+            kwargs["constant"] = _ods_ir.UnitAttr.get()
+
         super().__init__(
-            sym_name, _ods_ir.DenseElementsAttr.get(attrs, ty), loc=loc, ip=ip
+            sym_name, _ods_ir.DenseElementsAttr.get(attrs, ty), loc=loc, ip=ip, **kwargs
         )
 
 
@@ -1205,6 +1462,52 @@ def make_tensor_view_type(
     return tensor_view_type
 
 
+def _check_partition_view_like_type(
+    tensor_view_type, tile_shape: List[int], dim_map: List[int]
+):
+    if not isinstance(tensor_view_type, TensorViewType):
+        raise TypeError(f"Expected tensor view type, got {tensor_view_type}")
+
+    if not isinstance(tile_shape, list) and not isinstance(tile_shape, tuple):
+        raise TypeError(
+            f"Expected tile_shape to be a list or tuple, got {type(tile_shape).__name__}"
+        )
+
+    if not all(isinstance(dim, int) for dim in tile_shape):
+        raise TypeError(
+            f"Expected tile_shape to be an array of integers, got {tile_shape}"
+        )
+
+    if not all(dim > 0 for dim in tile_shape):
+        raise ValueError(
+            f"Expected tile_shape dimensions to be positive, got {tile_shape}"
+        )
+
+    if len(tile_shape) != len(tensor_view_type.shape):
+        raise ValueError(
+            f"Expected tile shape of same rank as tensor view, got tile shape "
+            f"{tile_shape} and tensor view shape {tensor_view_type.shape}"
+        )
+
+    if not isinstance(dim_map, list) and not isinstance(dim_map, tuple):
+        raise TypeError(
+            f"Expected dim_map to be a list or tuple, got {type(dim_map).__name__}"
+        )
+
+    if not all(isinstance(dim, int) for dim in dim_map):
+        raise TypeError(f"Expected dim_map to be an array of integers, got {dim_map}")
+
+    if len(dim_map) != len(tile_shape):
+        raise ValueError(
+            f"Expected dim_map length to match tile_shape length, got {len(dim_map)} vs {len(tile_shape)}"
+        )
+
+    if set(dim_map) != set(range(len(tensor_view_type.shape))):
+        raise ValueError(
+            f"Dim map should map exactly to the dimensions of the tensor view, got {dim_map}"
+        )
+
+
 def make_partition_view_type(
     tensor_view_type,
     tile_shape: List[int],
@@ -1217,28 +1520,14 @@ def make_partition_view_type(
     whether out-of-bound accesses should be masked.
     """
 
+    if not isinstance(tile_shape, list) and not isinstance(tile_shape, tuple):
+        raise TypeError(
+            f"Expected tile_shape to be a list or tuple, got {type(tile_shape).__name__}"
+        )
+
     dim_map = dim_map or list(range(len(tile_shape)))
 
-    if not isinstance(tensor_view_type, TensorViewType):
-        raise TypeError(f"Expected tensor view type, got {tensor_view_type}")
-
-    if not all(isinstance(dim, int) for dim in tile_shape):
-        raise TypeError(
-            f"Expected tile_shape to be an array of integers, got {tile_shape}"
-        )
-
-    tensor_view_shape = tensor_view_type.shape
-    if len(tile_shape) != len(tensor_view_shape):
-        raise ValueError(
-            "Expected tile shape of same rank as tensor view, got tile shape"
-            f"{tile_shape} and tensor view shape {tensor_view_shape}"
-        )
-
-    if set(dim_map) != set(range(len(tensor_view_shape))):
-        raise ValueError(
-            "Dim map should map exactly to the dimensions "
-            f"of the tensor view, got {dim_map}"
-        )
+    _check_partition_view_like_type(tensor_view_type, tile_shape, dim_map)
 
     padding_value_attr = (
         get_padding_value_attr(padding_value) if padding_value else None
@@ -1255,6 +1544,64 @@ def make_partition_view_type(
         )
 
     return partition_view_type
+
+
+def make_strided_view_type(
+    tensor_view_type,
+    tile_shape: List[int],
+    traversal_strides: List[int],
+    dim_map: List[int] | None = None,
+    padding_value: PaddingValue | None = None,
+) -> StridedViewType:
+    """
+    Creates a StridedViewType from a tensor view MLIR type, a tile shape,
+    traversal strides, the type of the indices to use within the view, a
+    dimension mapping and whether out-of-bound accesses should be masked.
+    """
+
+    if not isinstance(tile_shape, list) and not isinstance(tile_shape, tuple):
+        raise TypeError(
+            f"Expected tile_shape to be a list or tuple, got {type(tile_shape).__name__}"
+        )
+
+    dim_map = dim_map or list(range(len(tile_shape)))
+
+    _check_partition_view_like_type(tensor_view_type, tile_shape, dim_map)
+
+    if not isinstance(traversal_strides, list) and not isinstance(
+        traversal_strides, tuple
+    ):
+        raise TypeError(
+            f"Expected traversal_strides to be a list or tuple, got {type(traversal_strides).__name__}"
+        )
+
+    if len(tile_shape) != len(traversal_strides):
+        raise ValueError(
+            "Expected tile shape and traversal strides to have the same length, "
+            f"got {len(tile_shape)} vs {len(traversal_strides)}"
+        )
+
+    if not all(isinstance(stride, int) and stride > 0 for stride in traversal_strides):
+        raise ValueError(
+            "Expected traversal strides to be a list of strictly positive integers, "
+            f"got {traversal_strides}"
+        )
+
+    padding_value_attr = (
+        get_padding_value_attr(padding_value) if padding_value else None
+    )
+    strided_view_type = StridedViewType.get(
+        tile_shape, traversal_strides, tensor_view_type, dim_map, padding_value_attr
+    )
+
+    if strided_view_type is None:
+        raise RuntimeError(
+            f"Error creating StridedViewType with element type {tensor_view_type}, "
+            f"tile_shape {tile_shape}, traversal_strides {traversal_strides}, dim_map {dim_map} "
+            f"{'with padding value ' + str(padding_value) if padding_value else ''}"
+        )
+
+    return strided_view_type
 
 
 def check_same_type(func):
@@ -1415,6 +1762,42 @@ def absi(source: Tile, *, loc=None, ip=None) -> Tile:
 def absf(source: Tile, *, loc=None, ip=None) -> Tile:
     """Performs element-wise absolute value on input float tile."""
     return return_results(_cuda_tile.AbsFOp(source, loc=loc, ip=ip))
+
+
+@cuda_tile_op
+def alloca(num_elem: int, alignment: int, *, loc=None, ip=None) -> Tile:
+    """
+    Create a dynamic memory allocation operation that returns a pointer.
+
+    Allocates memory sufficient to hold `num_elem` elements and returns a pointer
+    to the allocated memory, or traps if the request cannot be satisfied. The
+    returned address is guaranteed to be aligned to `alignment` bytes, which must
+    be a non-zero power of two. The lifetime of the allocation is limited to the
+    block in which the alloca resides.
+
+    Args:
+        num_elem: Number of elements to allocate (must be positive)
+        alignment: Memory alignment in bytes (must be a power of 2)
+
+    Returns:
+        A scalar tile containing a pointer to the allocated memory
+    """
+    if num_elem <= 0:
+        raise ValueError(f"num_elem must be positive, got {num_elem}")
+    if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+        raise ValueError(f"alignment must be a positive power of 2, got {alignment}")
+
+    ptr_type = PointerType.get(_ods_ir.IntegerType.get_signless(64))
+    result_type = TileType.get([], ptr_type)
+    return return_results(
+        _cuda_tile.AllocaOp(
+            result_type,
+            num_elem=num_elem,
+            alignment=alignment,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 @cuda_tile_op
@@ -1777,6 +2160,146 @@ def atomic_rmw_tko(
 
 
 @cuda_tile_op
+def atomic_red_view_tko(
+    view: TileView,
+    index: Sequence[Union[Tile, int]],
+    mode: AtomicRMWMode,
+    value: Tile,
+    *,
+    memory_ordering_semantics: MemoryOrderingSemantics = MemoryOrderingSemantics.RELAXED,
+    memory_scope: MemoryScope = MemoryScope.DEVICE,
+    input_token=None,
+    loc=None,
+    ip=None,
+) -> Token:
+    """View-based atomic reduction on global memory.
+
+    Performs element-wise atomic read-modify-write operations on global memory
+    locations specified by ``view`` at tile position ``index``. Unlike
+    ``atomic_rmw_tko``, this operation uses view-based addressing and does not
+    return the original values from memory. The values written are determined by
+    ``mode`` and ``value``.
+
+    For each element at position [i, j, ...] in ``value``::
+
+        atomic {
+            addr = view[index][i, j, ...]
+            x = *addr
+            y = mode(x, value[i, j, ...])
+            *addr = y
+            // x is discarded (not returned)
+        }
+
+    This operation is suitable for accumulation patterns where multiple CTAs
+    update the same memory locations and the original values are not needed,
+    such as distributed gradient accumulation.
+
+    Args:
+        view: Target partition view specifying the global memory locations.
+        index: N-dimensional index of the tile to reduce into. Must have the
+            same rank as the view's index space. Each element is either a
+            scalar integer Tile or a Python int (converted automatically).
+        mode: Atomic RMW mode. Supported modes by data type:
+            - ADD, AND, MAX, MIN, OR, UMAX, UMIN, XOR: i32, i64
+            - ADDF: f16, bf16, f32, f64
+        value: Value tile to apply atomically. Shape must match the view.
+        memory_ordering_semantics: Memory ordering for the atomic reduction.
+            Currently only RELAXED is supported.
+        memory_scope: Memory visibility scope (tl_blk, device).
+        input_token: Optional input token for ordering.
+
+    Returns:
+        Token for operation ordering.
+    """
+    if not isinstance(view, TileView):
+        raise TypeError(f"Expected TileView, got {type(view).__name__}")
+    if not isinstance(value, Tile):
+        raise TypeError(f"Expected Tile, got {type(value).__name__}")
+    assert isinstance(
+        mode, AtomicRMWMode
+    ), f"Expected AtomicRMWMode, got {type(mode).__name__}"
+
+    if value.tile_type != view.view_tile_type:
+        raise TypeError(
+            f"Expected value tile type to be {view.view_tile_type}, "
+            f"got {value.tile_type}"
+        )
+
+    if mode == AtomicRMWMode.XCHG:
+        raise ValueError("atomic_red_view_tko op cannot use xchg operation")
+
+    _INT_MODES = {
+        AtomicRMWMode.ADD,
+        AtomicRMWMode.AND,
+        AtomicRMWMode.OR,
+        AtomicRMWMode.XOR,
+        AtomicRMWMode.MAX,
+        AtomicRMWMode.MIN,
+        AtomicRMWMode.UMAX,
+        AtomicRMWMode.UMIN,
+    }
+    if mode in _INT_MODES:
+        if not (
+            isinstance(value.element_type, _ods_ir.IntegerType)
+            and value.element_type.width in (32, 64)
+        ):
+            raise ValueError(f"'{mode.value}' works only with integers i32 and i64")
+    elif mode == AtomicRMWMode.ADDF:
+        if not isinstance(
+            value.element_type,
+            (_ods_ir.F16Type, _ods_ir.BF16Type, _ods_ir.F32Type, _ods_ir.F64Type),
+        ):
+            raise ValueError(
+                f"'{mode.value}' works only with floats f16, bf16, f32, and f64"
+            )
+
+    if view.view_index_rank != len(index):
+        raise ValueError(
+            f"Expected {view.view_index_rank} index values, got {len(index)}"
+        )
+
+    if input_token is not None and not isinstance(input_token, Token):
+        raise ValueError("input_token must be a Token")
+
+    if memory_ordering_semantics != MemoryOrderingSemantics.RELAXED:
+        raise ValueError(
+            "atomic_red_view_tko only supports RELAXED memory ordering semantics"
+        )
+
+    if memory_scope == MemoryScope.SYS:
+        raise ValueError(
+            "atomic_red_view_tko does not support SYS memory scope for TMA compatibility; "
+            "use TL_BLK or DEVICE"
+        )
+
+    if isinstance(view, (PartitionView, StridedView)) and "padding_value" in str(
+        view.type
+    ):
+        raise ValueError(
+            "views with padding_value are not supported for atomic reductions"
+        )
+
+    index_tiles = _index_list_to_tiles(index)
+    mode_attr = get_atomic_rmw_mode_attr(mode)
+    sem_attr = get_memory_ordering_semantics_attr(memory_ordering_semantics)
+    scope_attr = get_memory_scope_attr(memory_scope)
+
+    op = _cuda_tile.AtomicRedViewTkoOp(
+        memory_ordering_semantics=sem_attr,
+        memory_scope=scope_attr,
+        view=view,
+        index=index_tiles,
+        mode=mode_attr,
+        value=value,
+        token=input_token,
+        loc=loc,
+        ip=ip,
+    )
+
+    return return_results(op)
+
+
+@cuda_tile_op
 def bitcast(el_type, src: Tile, *, loc=None, ip=None) -> Tile:
     el_type = _get_mlir_type(el_type)
 
@@ -1797,6 +2320,15 @@ def bitcast(el_type, src: Tile, *, loc=None, ip=None) -> Tile:
     return return_results(
         _cuda_tile.BitcastOp(result=result_type, source=src, loc=loc, ip=ip)
     )
+
+
+def _get_element_bit_width(elem_type) -> int:
+    """Get element bit width matching C++ getTileSizeInBits logic."""
+    if isinstance(elem_type, _ods_ir.IntegerType) and elem_type.width == 1:
+        return 1
+    if isinstance(elem_type, _ods_ir.FloatTF32Type):
+        return 32
+    return elem_type.width
 
 
 @cuda_tile_op
@@ -1849,9 +2381,17 @@ def cos(source: Tile, *, loc=None, ip=None) -> Tile:
 
 @cuda_tile_op
 @check_data_type_unary("source", _ods_ir.IntegerType)
-def negi(source: Tile, *, loc=None, ip=None) -> Tile:
+def negi(
+    source: Tile, *, overflow: IntegerOverflow = IntegerOverflow.NONE, loc=None, ip=None
+) -> Tile:
     """Computes the arithmetic inverse of the source integer tile element-wise."""
-    return return_results(_cuda_tile.NegIOp(source=source, loc=loc, ip=ip))
+    if overflow == IntegerOverflow.NUW:
+        raise ValueError("'no_unsigned_wrap' overflow flag is not supported for negi")
+    return return_results(
+        _cuda_tile.NegIOp(
+            source=source, overflow=get_integer_overflow_attr(overflow), loc=loc, ip=ip
+        )
+    )
 
 
 @cuda_tile_op
@@ -1893,6 +2433,16 @@ def ori(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
 def pow(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
     """Raises lhs to the power of rhs element-wise."""
     return return_results(_cuda_tile.PowOp(lhs, rhs, loc=loc, ip=ip))
+
+
+@cuda_tile_op
+@promote_rhs_to_tile
+@check_data_type_binary("lhs", _ods_ir.FloatType)
+@check_data_type_binary("rhs", _ods_ir.FloatType)
+@check_same_type
+def atan2(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
+    """Compute element-wise arc tangent of lhs/rhs with correct quadrant."""
+    return return_results(_cuda_tile.Atan2Op(lhs, rhs, loc=loc, ip=ip))
 
 
 @cuda_tile_op
@@ -2294,10 +2844,160 @@ def mma(
 
 
 @cuda_tile_op
+def mmaf_scaled(
+    lhs: Tile,
+    rhs: Tile,
+    acc: Tile,
+    lhs_scale: Tile,
+    rhs_scale: Tile,
+    *,
+    loc=None,
+    ip=None,
+) -> Tile:
+    """Computes scaled matrix-multiply-accumulate for low-precision types."""
+    # Check shapes - mirrors verifyMmaShapes in CudaTile.cpp
+    lhs_rank = len(lhs.tile_type.shape)
+    rhs_rank = len(rhs.tile_type.shape)
+    acc_rank = len(acc.tile_type.shape)
+    lhs_scale_rank = len(lhs_scale.tile_type.shape)
+    rhs_scale_rank = len(rhs_scale.tile_type.shape)
+
+    if lhs_rank not in (2, 3):
+        raise ValueError("operands must be 2D or 3D tiles")
+    if lhs_rank != rhs_rank or rhs_rank != acc_rank:
+        raise ValueError("lhs, rhs, acc must have the same rank")
+    if lhs_rank != lhs_scale_rank or lhs_rank != rhs_scale_rank:
+        raise ValueError("lhs, rhs, acc, lhs_scale, rhs_scale must have the same rank")
+
+    batched = int(lhs_rank == 3)
+    row_dim = batched + 0
+    col_dim = batched + 1
+
+    # Check batch dimensions (mirrors verifyMmaShapes)
+    if batched:
+        if lhs.tile_type.shape[0] != rhs.tile_type.shape[0]:
+            raise ValueError(
+                "dim 0 of lhs and dim 0 of rhs (batch dimension) must match"
+            )
+        if lhs.tile_type.shape[0] != acc.tile_type.shape[0]:
+            raise ValueError(
+                "dim 0 of lhs and dim 0 of acc (batch dimension) must match"
+            )
+
+    # Check MMA shape constraints (mirrors verifyMmaShapes)
+    if lhs.tile_type.shape[col_dim] != rhs.tile_type.shape[row_dim]:
+        raise ValueError(f"dim {col_dim} of lhs and dim {row_dim} of rhs must match")
+    if lhs.tile_type.shape[row_dim] != acc.tile_type.shape[row_dim]:
+        raise ValueError(f"dim {row_dim} of lhs and dim {row_dim} of acc must match")
+    if rhs.tile_type.shape[col_dim] != acc.tile_type.shape[col_dim]:
+        raise ValueError(f"dim {col_dim} of rhs and dim {col_dim} of acc must match")
+
+    # Check scale shape constraints (mirrors MmaFScaledOp::verify)
+    if batched:
+        if lhs.tile_type.shape[0] != lhs_scale.tile_type.shape[0]:
+            raise ValueError(
+                f"shape error: dim 0 of lhs ({lhs.tile_type.shape[0]}) and "
+                f"dim 0 of lhs_scale ({lhs_scale.tile_type.shape[0]}) must match"
+            )
+        if rhs.tile_type.shape[0] != rhs_scale.tile_type.shape[0]:
+            raise ValueError(
+                f"shape error: dim 0 of rhs ({rhs.tile_type.shape[0]}) and "
+                f"dim 0 of rhs_scale ({rhs_scale.tile_type.shape[0]}) must match"
+            )
+
+    # M and N dimensions must match, K can be different
+    if lhs.tile_type.shape[row_dim] != lhs_scale.tile_type.shape[row_dim]:
+        raise ValueError(
+            f"shape error: dim {row_dim} of lhs ({lhs.tile_type.shape[row_dim]}) and "
+            f"dim {row_dim} of lhs_scale ({lhs_scale.tile_type.shape[row_dim]}) must match"
+        )
+    if rhs.tile_type.shape[col_dim] != rhs_scale.tile_type.shape[col_dim]:
+        raise ValueError(
+            f"shape error: dim {col_dim} of rhs ({rhs.tile_type.shape[col_dim]}) and "
+            f"dim {col_dim} of rhs_scale ({rhs_scale.tile_type.shape[col_dim]}) must match"
+        )
+
+    # Validate element type combinations using registry (mirrors MmaFScaledOp::verify)
+    lhs_element_type = lhs.element_type
+    lhs_scale_element_type = lhs_scale.element_type
+
+    # Find matching MMA Scaled configuration
+    mma_scaled_config = find_mma_scaled_config(lhs_element_type, lhs_scale_element_type)
+
+    if mma_scaled_config is None:
+        # Generate helpful error message by showing supported configurations
+        supported_configs = get_supported_mma_scaled_configs()
+        if supported_configs:
+            config_descriptions = [config.name for config in supported_configs]
+            raise TypeError(
+                f"Unsupported MMA Scaled element type combination: "
+                f"operand={lhs_element_type}, scale={lhs_scale_element_type}. "
+                f"Supported configurations: {', '.join(config_descriptions)}"
+            )
+        else:
+            raise TypeError(
+                f"Unsupported MMA Scaled element type combination: "
+                f"operand={lhs_element_type}, scale={lhs_scale_element_type}"
+            )
+
+    return return_results(
+        _cuda_tile.MmaFScaledOp(
+            lhs=lhs,
+            rhs=rhs,
+            acc=acc,
+            lhs_scale=lhs_scale,
+            rhs_scale=rhs_scale,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@cuda_tile_op
 def extract(result, source, indices, *, loc=None, ip=None) -> Tile:
     """Extracts a slice from the source tile at the specified indices."""
     if isinstance(result, TileType) is False:
         raise Exception("result type must be cuda_tile.TileType")
+
+    # Verify that source and result have the same element type
+    if source.element_type != result.element_type:
+        raise ValueError("Expected source and result to have the same element type.")
+
+    # Verify that the number of indices matches the rank of the source
+    source_rank = len(source.tile_type.shape)
+    if len(indices) != source_rank:
+        raise ValueError(f"Expected {source_rank} indices, but got {len(indices)}")
+
+    # Verify that source dimensions are evenly divisible by result dimensions
+    source_shape = source.tile_type.shape
+    result_shape = result.shape
+    if len(source_shape) != len(result_shape):
+        raise ValueError("Expected source and result to have the same rank.")
+
+    for i, (source_dim, result_dim) in enumerate(zip(source_shape, result_shape)):
+        if source_dim % result_dim != 0:
+            raise ValueError(
+                f"Source dimension {i} size ({source_dim}) must be evenly divisible by "
+                f"result dimension {i} size ({result_dim})"
+            )
+
+    # Verify indices are valid and perform bounds checking
+    for i, index in enumerate(indices):
+        if not isinstance(index, Tile):
+            raise TypeError(f"Index {i} must be a Tile, got {type(index).__name__}")
+
+        # Check if index is scalar
+        index_shape = index.tile_type.shape
+        if len(index_shape) != 0:
+            raise ValueError(
+                f"Index {i} must be a scalar tile, got rank {len(index_shape)}"
+            )
+
+        # Check if index has i32 element type
+        if index.element_type != _ods_ir.IntegerType.get_signless(32):
+            raise ValueError(f"Index {i} must have i32 element type")
+
+    # Constant bounds checking is done by the C++ verifier.
 
     return return_results(
         _cuda_tile.ExtractOp(
@@ -2319,7 +3019,7 @@ def get_num_tile_blocks(*, loc=None, ip=None) -> Tile:
 
 
 @cuda_tile_op
-def trunci(el_type, from_, *, loc=None, ip=None) -> Tile:
+def trunci(el_type, from_, *, overflow=None, loc=None, ip=None) -> Tile:
     """Truncates the source integer to the specified target type."""
     if not isinstance(el_type, type) or not isinstance(
         el_type.mlir_type, _ods_ir.IntegerType
@@ -2333,9 +3033,14 @@ def trunci(el_type, from_, *, loc=None, ip=None) -> Tile:
             f"source type {src_el_type} has a bitwidth smaller than or equal to destination type {el_type.mlir_type}"
         )
 
+    overflow_attr = (
+        get_integer_overflow_attr(overflow) if overflow is not None else None
+    )
     result_type = make_tile_type(el_type, from_.tile_type.shape)
     return return_results(
-        _cuda_tile.TruncIOp(to=result_type, from_=from_, loc=loc, ip=ip)
+        _cuda_tile.TruncIOp(
+            to=result_type, from_=from_, overflow=overflow_attr, loc=loc, ip=ip
+        )
     )
 
 
@@ -2889,10 +3594,16 @@ def ftof(
     if src_el_type == el_type.mlir_type:
         raise TypeError(f"source and destination types are identical: {src_el_type}")
 
-    if rounding_mode != RoundingMode.NEAREST_EVEN:
-        raise ValueError(
-            f"Invalid rounding mode for ftof: {rounding_mode}, expected NEAREST_EVEN"
-        )
+    if el_type.mlir_type == Float8E8M0FNU.mlir_type:
+        if rounding_mode not in [RoundingMode.ZERO, RoundingMode.POSITIVE_INF]:
+            raise ValueError(
+                f"Invalid rounding mode for ftof to f8E8M0FNU: {rounding_mode}, expected ZERO or POSITIVE_INF"
+            )
+    else:
+        if rounding_mode != RoundingMode.NEAREST_EVEN:
+            raise ValueError(
+                f"Invalid rounding mode for ftof: {rounding_mode}, expected NEAREST_EVEN"
+            )
     result_type = make_tile_type(el_type, from_.tile_type.shape)
     return return_results(
         _cuda_tile.FToFOp(
@@ -2979,7 +3690,13 @@ def exti(
 
 @cuda_tile_op
 def itof(
-    el_type, from_, *, signedness: Signedness = Signedness.SIGNED, loc=None, ip=None
+    el_type,
+    from_,
+    *,
+    rounding_mode: RoundingMode = RoundingMode.NEAREST_EVEN,
+    signedness: Signedness = Signedness.SIGNED,
+    loc=None,
+    ip=None,
 ):
     if not isinstance(el_type, type) or not isinstance(
         el_type.mlir_type, _ods_ir.FloatType
@@ -2990,6 +3707,14 @@ def itof(
     src_el_type = from_.tile_type.element_type
     if not isinstance(src_el_type, _ods_ir.IntegerType):
         raise TypeError(f"expected integer tile type for source, but got {src_el_type}")
+    if el_type.mlir_type == Float8E8M0FNU.mlir_type:
+        raise ValueError(
+            f"Integer to f8E8M0FNU conversion is not supported, please first convert to another float type"
+        )
+    if rounding_mode != RoundingMode.NEAREST_EVEN:
+        raise ValueError(
+            f"Invalid rounding mode for itof: {rounding_mode}, expected NEAREST_EVEN"
+        )
 
     result_type = make_tile_type(el_type, from_.tile_type.shape)
     return return_results(
@@ -2997,7 +3722,7 @@ def itof(
             to=result_type,
             from_=from_,
             signedness=get_signedness_attr(signedness),
-            rounding_mode=get_rounding_mode_attr(RoundingMode.NEAREST_EVEN),
+            rounding_mode=get_rounding_mode_attr(rounding_mode),
             loc=loc,
             ip=ip,
         )
@@ -3010,7 +3735,7 @@ def if_generate(
     then_body: Callable,
     else_body: Optional[Callable] | None = None,
     input_args: List[Tile] | None = None,
-    return_types: List[Tile] | None = None,
+    return_types: List[Union[Tile, Token]] | None = None,
     *,
     loc=None,
     ip=None,
@@ -3018,9 +3743,12 @@ def if_generate(
     input_args = input_args or []
     return_types = return_types or []
 
-    return_types = [t.tile_type for t in return_types]
+    # Support both Tile and Token in return_types by taking their underlying MLIR types
+    result_types = [
+        t.value.type if isinstance(t, (Tile, Token)) else t for t in return_types
+    ]
 
-    if_op = _cuda_tile.IfOp(results_=return_types, condition=condition, loc=loc, ip=ip)
+    if_op = _cuda_tile.IfOp(results_=result_types, condition=condition, loc=loc, ip=ip)
 
     if_op.thenRegion.blocks.append()
 
@@ -3028,11 +3756,11 @@ def if_generate(
         args = then_body(*input_args)
         if args is None:
             pass
-        elif isinstance(args, Tile):
+        elif isinstance(args, Tile) or isinstance(args, Token):
             _cuda_tile.YieldOp(operands_=[args.value], loc=loc, ip=ip)
         else:
-            tile_args = [t.value for t in args]
-            _cuda_tile.YieldOp(operands_=tile_args, loc=loc, ip=ip)
+            yielded = [a.value for a in args]
+            _cuda_tile.YieldOp(operands_=yielded, loc=loc, ip=ip)
 
     if else_body is not None:
         if_op.elseRegion.blocks.append()
@@ -3040,11 +3768,11 @@ def if_generate(
             args = else_body(*input_args)
             if args is None:
                 pass
-            elif isinstance(args, Tile):
+            elif isinstance(args, Tile) or isinstance(args, Token):
                 _cuda_tile.YieldOp(operands_=[args.value], loc=loc, ip=ip)
             else:
-                tile_args = [t.value for t in args]
-                _cuda_tile.YieldOp(operands_=tile_args, loc=loc, ip=ip)
+                yielded = [a.value for a in args]
+                _cuda_tile.YieldOp(operands_=yielded, loc=loc, ip=ip)
 
     return return_results(if_op)
 
@@ -3214,6 +3942,7 @@ def for_loop(
     init_values: Sequence[Tile] = (),
     el_type=Int32,
     *,
+    unsigned: bool = False,
     loc=None,
     ip=None,
 ) -> Tuple[Tile, ...]:
@@ -3229,6 +3958,9 @@ def for_loop(
 
     By default, the induction variable element type is Int32, which can be
     overriden by setting `el_type`.
+
+    By default, signed comparison is used for loop termination. Set `unsigned=True`
+    to use unsigned integer comparison.
     """
 
     index_type = el_type.mlir_type
@@ -3255,6 +3987,7 @@ def for_loop(
         upperBound=upper_bound,
         step=step,
         initValues=init_values,
+        unsignedCmp=unsigned,
         loc=loc,
         ip=ip,
     )
@@ -3275,23 +4008,27 @@ def entry(
     arch=None,
     arg_attrs=None,
     num_cta=None,
+    num_worker_warps=None,
     occupancy=None,
     loc=None,
     ip=None,
 ) -> Tile:
     optimization_hints = None
-    if (arch != None) and ((num_cta != None) or (occupancy != None)):
+    if (arch != None) and (
+        (num_cta != None) or (num_worker_warps != None) or (occupancy != None)
+    ):
         optimization_hints = OptimizationHintsAttr.getEntryOpHint(
             arch,
             0 if num_cta is None else num_cta,
+            0 if num_worker_warps is None else num_worker_warps,
             0 if occupancy is None else occupancy,
             context=_ods_get_default_loc_context(loc),
         )
-    elif (num_cta != None) or (occupancy != None):
+    elif (num_cta != None) or (num_worker_warps != None) or (occupancy != None):
         # (arch == None) and hint values are specified
         raise ValueError(
             "Expected arch to be specified for OptimizationHint:"
-            f" num_cta = {num_cta}, occupancy = {occupancy}"
+            f" num_cta = {num_cta}, num_worker_warps = {num_worker_warps}, occupancy = {occupancy}"
         )
     return _cuda_tile.EntryOp(
         sym_name=sym_name,
@@ -3535,11 +4272,7 @@ def min(
 def optimization_barrier(
     value: Tile, keep_axis_info: bool = False, *, loc=None, ip=None
 ) -> Tile:
-    return return_results(
-        _cuda_tile.OptimizationBarrierOp(
-            value, keep_axis_info=keep_axis_info, loc=loc, ip=ip
-        )
-    )
+    return value
 
 
 # Helper function for both reduce and scan operations
@@ -3691,8 +4424,34 @@ def tan(source: Tile, *, loc=None, ip=None) -> Tile:
 
 @cuda_tile_op
 @check_data_type_unary("source", _ods_ir.FloatType)
-def tanh(source: Tile, *, loc=None, ip=None) -> Tile:
-    return return_results(_cuda_tile.TanHOp(source=source, loc=loc, ip=ip))
+def tanh(
+    source: Tile,
+    *,
+    rounding_mode: RoundingMode = RoundingMode.FULL,
+    loc=None,
+    ip=None,
+) -> Tile:
+    """Compute the hyperbolic tangent of source element-wise."""
+
+    if rounding_mode not in [RoundingMode.APPROX, RoundingMode.FULL]:
+        raise ValueError(
+            f"Invalid rounding mode for tanh: {rounding_mode}, expected APPROX or FULL"
+        )
+    if rounding_mode == RoundingMode.APPROX and not isinstance(
+        source.element_type, _ods_ir.F32Type
+    ):
+        raise ValueError(
+            f"approx rounding mode only supported for f32 data type, but got: {source.element_type}"
+        )
+
+    return return_results(
+        _cuda_tile.TanHOp(
+            source=source,
+            rounding_mode=get_rounding_mode_attr(rounding_mode),
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 @cuda_tile_op
@@ -3756,7 +4515,7 @@ def cmp(
 ) -> Tile:
     """Performs element-wise comparison of two tiles."""
 
-    if comparison_predicate not in ComparisonPredicates:
+    if not isinstance(comparison_predicate, ComparisonPredicates):
         raise ValueError(
             f"Invalid cuda_tile.cmpf 'comparison_predicate' argument: {comparison_predicate}"
         )
@@ -3913,7 +4672,15 @@ _cuda_tile.GlobalOp.counter = 0
 
 @cuda_tile_op
 def global_(
-    symbol_name, value, el_type=None, tile_type: TileType = None, loc=None, ip=None
+    symbol_name,
+    value,
+    el_type=None,
+    tile_type: TileType = None,
+    alignment=None,
+    symbol_visibility: SymbolVisibility | None = None,
+    constant: bool = False,
+    loc=None,
+    ip=None,
 ):
     """
     Create a cuda_tile.global in the enclosing cuda_tile.module.
@@ -3946,7 +4713,16 @@ def global_(
     if len(tile_type.shape) != 1:
         raise ValueError(f"type must have rank 1, but found {len(tile_type.shape)}")
     with _ods_ir.InsertionPoint(current_op.regions[0].blocks[0]):
-        return _GlobalOp(tile_type, symbol_name, flattened_values, loc=loc, ip=ip)
+        return _GlobalOp(
+            tile_type,
+            symbol_name,
+            flattened_values,
+            alignment=alignment,
+            symbol_visibility=symbol_visibility,
+            constant=constant,
+            loc=loc,
+            ip=ip,
+        )
 
 
 @cuda_tile_op
@@ -3967,7 +4743,14 @@ def get_global(global_op, loc=None, ip=None):
 
 @cuda_tile_op
 def create_and_get_global(
-    value, el_type=None, tile_type: TileType = None, loc=None, ip=None
+    value,
+    el_type=None,
+    tile_type: TileType = None,
+    alignment=None,
+    symbol_visibility: SymbolVisibility | None = None,
+    constant: bool = False,
+    loc=None,
+    ip=None,
 ):
     """
     Helper function that inserts a new cuda_tile.global in the enclosing module
@@ -3979,7 +4762,17 @@ def create_and_get_global(
     _cuda_tile.GlobalOp.counter += 1
 
     # Insert cuda_tile.global op and cuda_tile.get_global op.
-    global_op = global_(symbol_name, value, el_type, tile_type, loc=loc, ip=ip)
+    global_op = global_(
+        symbol_name,
+        value,
+        el_type,
+        tile_type,
+        alignment=alignment,
+        symbol_visibility=symbol_visibility,
+        constant=constant,
+        loc=loc,
+        ip=ip,
+    )
     return get_global(global_op, loc=loc, ip=ip)
 
 
@@ -4112,53 +4905,38 @@ def make_partition_view(
     if not isinstance(tensor_view, TensorView):
         raise TypeError(f"Expected TensorView, got {type(tensor_view).__name__}")
 
-    if not isinstance(tile_shape, list) and not isinstance(tile_shape, tuple):
-        raise TypeError(
-            f"Expected tile_shape to be a list or tuple, got {type(tile_shape).__name__}"
-        )
-
-    if not all(isinstance(dim, int) for dim in tile_shape):
-        raise TypeError(
-            f"Expected tile_shape to be an array of integers, got {tile_shape}"
-        )
-
-    if not all(dim > 0 for dim in tile_shape):
-        raise ValueError(
-            f"Expected tile_shape dimensions to be positive, got {tile_shape}"
-        )
-
-    if len(tile_shape) != len(tensor_view.shape):
-        raise ValueError(
-            f"Expected tile shape of same rank as tensor view, got tile shape "
-            f"{tile_shape} and tensor view shape {tensor_view.shape}"
-        )
-
-    if dim_map is not None:
-        if not isinstance(dim_map, list) and not isinstance(dim_map, tuple):
-            raise TypeError(
-                f"Expected dim_map to be a list or tuple, got {type(dim_map).__name__}"
-            )
-
-        if not all(isinstance(dim, int) for dim in dim_map):
-            raise TypeError(
-                f"Expected dim_map to be an array of integers, got {dim_map}"
-            )
-
-        if len(dim_map) != len(tile_shape):
-            raise ValueError(
-                f"Expected dim_map length to match tile_shape length, got {len(dim_map)} vs {len(tile_shape)}"
-            )
-
-        if set(dim_map) != set(range(len(tensor_view.shape))):
-            raise ValueError(
-                f"Dim map should map exactly to the dimensions of the tensor view, got {dim_map}"
-            )
-
     partition_view_type = make_partition_view_type(
         tensor_view.tensor_view_type, tile_shape, dim_map, padding_value
     )
     return return_partition_view(
         _cuda_tile.MakePartitionViewOp(partition_view_type, tensor_view, loc=loc, ip=ip)
+    )
+
+
+@cuda_tile_op
+def make_strided_view(
+    tensor_view: TensorView,
+    tile_shape: List[int],
+    traversal_strides: List[int],
+    *,
+    dim_map: List[int] | None = None,
+    padding_value: PaddingValue | None = None,
+    loc=None,
+    ip=None,
+) -> StridedView:
+    # Input validation
+    if not isinstance(tensor_view, TensorView):
+        raise TypeError(f"Expected TensorView, got {type(tensor_view).__name__}")
+
+    strided_view_type = make_strided_view_type(
+        tensor_view.tensor_view_type,
+        tile_shape,
+        traversal_strides,
+        dim_map,
+        padding_value,
+    )
+    return return_strided_view(
+        _cuda_tile.MakeStridedViewOp(strided_view_type, tensor_view, loc=loc, ip=ip)
     )
 
 
@@ -4169,6 +4947,64 @@ def make_partition_view(
 @check_data_type_binary("rhs", _ods_ir.IntegerType)
 def xori(lhs, rhs, *, loc=None, ip=None) -> Tile:
     return return_results(_cuda_tile.XOrIOp(lhs, rhs, loc=loc, ip=ip))
+
+
+@cuda_tile_op
+def pack(source: Tile, *, loc=None, ip=None) -> Tile:
+    """Pack a numeric tile into an i8 byte array, preserving bit values."""
+    if len(source.shape) != 1:
+        raise TypeError(f"pack expects rank-1 tile, got rank-{len(source.shape)}")
+
+    elem_bits = _get_element_bit_width(source.element_type)
+    src_bits = elem_bits * source.num_elements
+
+    if src_bits % 8 != 0:
+        raise TypeError(
+            f"pack expects source tile to be byte-aligned, got {src_bits} bits"
+        )
+
+    num_bytes = src_bits // 8
+    result_type = TileType.get([num_bytes], _ods_ir.IntegerType.get_signless(8))
+
+    return return_results(
+        _cuda_tile.PackOp(result=result_type, source=source, loc=loc, ip=ip)
+    )
+
+
+@cuda_tile_op
+def unpack(el_type, source: Tile, *, loc=None, ip=None) -> Tile:
+    """Unpack an i8 byte array into a numeric tile, preserving bit values."""
+    el_type = _get_mlir_type(el_type)
+
+    if len(source.shape) != 1:
+        raise TypeError(f"unpack expects rank-1 tile, got rank-{len(source.shape)}")
+
+    src_elem = source.element_type
+    if not (isinstance(src_elem, _ods_ir.IntegerType) and src_elem.width == 8):
+        raise TypeError(f"unpack source must be i8 tile, got {src_elem}")
+
+    num_bytes = source.shape[0]
+    src_bits = num_bytes * 8
+    elem_bits = _get_element_bit_width(el_type)
+
+    if src_bits % elem_bits != 0:
+        raise TypeError(
+            f"unpack: {num_bytes} bytes not divisible by {elem_bits}-bit elements"
+        )
+
+    num_elements = src_bits // elem_bits
+    res_bits = num_elements * elem_bits
+
+    if res_bits % 8 != 0:
+        raise TypeError(
+            f"unpack expects result tile to be byte-aligned, got {res_bits} bits"
+        )
+
+    result_type = TileType.get([num_elements], el_type)
+
+    return return_results(
+        _cuda_tile.UnpackOp(result=result_type, source=source, loc=loc, ip=ip)
+    )
 
 
 # =============================================================================

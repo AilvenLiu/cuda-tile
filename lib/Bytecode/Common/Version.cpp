@@ -45,7 +45,14 @@ const BytecodeVersion BytecodeVersion::kCurrentCompatibilityVersion = {
 /// The current version of the bytecode format.
 const BytecodeVersion BytecodeVersion::kCurrentVersion = {
     /*verMajor=*/13,
-    /*verMinor=*/2,
+    /*verMinor=*/3,
+    /*verTag=*/0,
+};
+
+/// The version when unified bitfield for optional parameters was introduced.
+const BytecodeVersion BytecodeVersion::kUnifiedBitfieldVersion = {
+    /*verMajor=*/13,
+    /*verMinor=*/3,
     /*verTag=*/0,
 };
 
@@ -68,3 +75,11 @@ bool mlir::cuda_tile::detail::isOpcodeAvailableInVersion(
     return false;
   return opcode <= it->second;
 }
+
+//===----------------------------------------------------------------------===//
+// Supported Versions List
+//===----------------------------------------------------------------------===//
+
+// Include auto-generated getSupportedVersions() function from TableGen.
+#define GEN_SUPPORTED_VERSIONS_LIST
+#include "StaticOpcodes.inc"

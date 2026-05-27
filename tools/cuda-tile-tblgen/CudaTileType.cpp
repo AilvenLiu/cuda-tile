@@ -1,4 +1,4 @@
-//===- CudaTileType.cpp - CUDA Tile IR Type wrapper for TableGen ---------*- C++
+//===- CudaTileType.cpp - CUDA Tile IR Type TableGen Wrapper ----*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -6,8 +6,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file implements the CUDA Tile dialect operations.
+// This file implements the CUDA Tile dialect type parsing and printing
+// utilities.
 //
 //===----------------------------------------------------------------------===//
 
@@ -28,6 +28,8 @@ namespace tblgen {
 CudaTileElementType elementTypeFromString(StringRef name) {
   if (name == "CudaTile_Int1")
     return kI1;
+  if (name == "CudaTile_Int4")
+    return kI4;
   if (name == "CudaTile_Int8")
     return kI8;
   if (name == "CudaTile_Int16")
@@ -40,6 +42,8 @@ CudaTileElementType elementTypeFromString(StringRef name) {
     return kF8E4M3FN;
   if (name == "CudaTile_Float8E5M2")
     return kF8E5M2;
+  if (name == "CudaTile_Float4E2M1FN")
+    return kF4E2M1FN;
   if (name == "CudaTile_Float16")
     return kF16;
   if (name == "CudaTile_BFloat16")
@@ -54,14 +58,17 @@ CudaTileElementType elementTypeFromString(StringRef name) {
 }
 
 std::vector<CudaTileElementType> allElementTypes() {
-  return {kI1,  kI8,  kI16,  kI32,  kI64,      kF16,
-          kF32, kF64, kBF16, kTF32, kF8E4M3FN, kF8E5M2};
+  return {kI1,       kI4,     kI8,  kI16,  kI32,  kI64, kF4E2M1FN,
+          kF8E4M3FN, kF8E5M2, kF16, kBF16, kTF32, kF32, kF64};
 }
 
 std::ostream &operator<<(std::ostream &os, CudaTileElementType elementType) {
   switch (elementType) {
   case kI1:
     os << "i1";
+    break;
+  case kI4:
+    os << "i4";
     break;
   case kI8:
     os << "i8";
@@ -95,6 +102,9 @@ std::ostream &operator<<(std::ostream &os, CudaTileElementType elementType) {
     break;
   case kTF32:
     os << "tf32";
+    break;
+  case kF4E2M1FN:
+    os << "fp4e2m1fn";
     break;
   case kUnknown:
     os << "unknown";
@@ -146,6 +156,7 @@ TileIRType TileIRType::float_tile() {
 TileIRType TileIRType::int_tile() {
   auto types = {
       TileIRType(std::make_shared<ElementType>(kI1)),
+      TileIRType(std::make_shared<ElementType>(kI4)),
       TileIRType(std::make_shared<ElementType>(kI8)),
       TileIRType(std::make_shared<ElementType>(kI16)),
       TileIRType(std::make_shared<ElementType>(kI32)),
@@ -236,9 +247,8 @@ void printAppliedType(std::ostream &os, const std::string &ty_ctor,
     os << "<";
     for (auto &arg : args) {
       os << arg.toString();
-      if (i != args.size() - 1) {
+      if (i != args.size() - 1)
         os << sep << " ";
-      }
       i++;
     }
     os << ">";
@@ -445,16 +455,14 @@ TileIRType getType(const Record &tcDef) {
 
   auto el_type = elementTypeFromString(tcDef.getName().str());
 
-  if (el_type != kUnknown) {
+  if (el_type != kUnknown)
     return TileIRType(std::make_shared<ElementType>(el_type));
-  }
   // If the type is a number tensor type, return the numeric tensor type.
   //
   // We put this one first because it is more specific than the other tensor
   // types.
-  if (tcDef.getName() == "CudaTile_NumberTileType") {
+  if (tcDef.getName() == "CudaTile_NumberTileType")
     return TileIRType::numeric_tile();
-  }
 
   // Base Types
   if (tcDef.getName() == "CudaTile_AnyType" || tcDef.getName() == "AnyType") {
@@ -482,6 +490,8 @@ TileIRType getType(const Record &tcDef) {
     // This should be a builtin type.
   } else if (tcDef.getName() == "CudaTile_PartitionViewType") {
     return TileIRType::builtin("partition_view");
+  } else if (tcDef.getName() == "CudaTile_StridedViewType") {
+    return TileIRType::builtin("strided_view");
   } else if (tcDef.getName() == "CudaTile_TileView") {
     // Today we represent the view type interface as a builtin type.
     return TileIRType::builtin("view_type");
@@ -524,12 +534,13 @@ TileIRType getType(const Record &tcDef) {
     auto baseTypeDesc = getType(*baseType);
     // TODO(@jroesch): add optional
     return baseTypeDesc;
+  } else if (tcDef.getName() == "I32") {
+    return TileIRType::builtin("i32");
   } else {
     std::string superTypes = " with superclasses (";
     auto superClasses = tcDef.getSuperClasses();
-    for (auto it = superClasses.rbegin(); it != superClasses.rend(); ++it) {
+    for (auto it = superClasses.rbegin(); it != superClasses.rend(); ++it)
       superTypes += (*it)->getName().str() + " | ";
-    }
     superTypes += ")";
 
     PrintFatalError("getType: unsupported type `" + tcDef.getName().str() +

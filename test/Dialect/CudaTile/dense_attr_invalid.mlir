@@ -206,7 +206,7 @@ cuda_tile.module @kernels {
 
 cuda_tile.module @kernels {
   entry @kernel() {
-    // expected-error@below {{expect element type to be one of i1 or i8 or i16 or i32 or i64 or f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 values, but got '<<NULL TYPE>>'}}
+    // expected-error@below {{expect element type to be one of i1 or i8 or i16 or i32 or i64 or f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '<<NULL TYPE>>'}}
     // expected-error@below {{'cuda_tile.constant' unknown type: pluto}}
     %0 = constant <pluto : 42.0> : !cuda_tile.tile<f32>
     return
@@ -219,7 +219,7 @@ cuda_tile.module @kernels {
 
 cuda_tile.module @kernels {
   entry @kernel() {
-    // expected-error@below {{expect element type to be one of i1 or i8 or i16 or i32 or i64 or f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 values, but got 'tensor<i32>'}}
+    // expected-error@below {{expect element type to be one of i1 or i8 or i16 or i32 or i64 or f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got 'tensor<i32>'}}
     %0 = constant <tensor<i32> : 42.0> : tensor<i32>
     return
   }

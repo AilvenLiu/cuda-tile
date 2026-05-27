@@ -23,6 +23,10 @@ mlir_tablegen(AttrDefs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=cuda_tile)
 mlir_tablegen(Enums.h.inc -gen-enum-decls -dialect=cuda_tile)
 mlir_tablegen(Enums.cpp.inc -gen-enum-defs -dialect=cuda_tile)
 
+set(LLVM_TARGET_DEFINITIONS Remarks.td)
+mlir_tablegen(TileIRRemarks.h.inc -gen-enum-decls)
+mlir_tablegen(TileIRRemarks.cpp.inc -gen-enum-defs)
+
 set(LLVM_TARGET_DEFINITIONS Ops.td)
 mlir_tablegen(Ops.h.inc -gen-op-decls)
 mlir_tablegen(Ops.cpp.inc -gen-op-defs)
@@ -30,8 +34,9 @@ mlir_tablegen(Ops.cpp.inc -gen-op-defs)
 add_public_tablegen_target(CudaTileIncGen)
 add_dependencies(mlir-headers CudaTileIncGen)
 
+    add_dependencies(mlir-headers cuda-tile-tblgen)
 # TableGen Markdown documentation generation.
-#####################################################################
+# ####################################################################
 # Note: MLIR generated documentation use Hugo, so we enable Hugo specific features
 # here.
 set(LLVM_TARGET_DEFINITIONS Dialect.td)
@@ -45,7 +50,7 @@ set(GEN_DOC_DIR ${CMAKE_SOURCE_DIR}/media/docs/Dialects/CudaTile)
 file(MAKE_DIRECTORY ${GEN_DOC_DIR})
 
 add_custom_command(
-	OUTPUT ${GEN_DOC_DIR}/CudaTile.md
+        OUTPUT ${GEN_DOC_DIR}/CudaTile.md
         COMMAND ${CMAKE_COMMAND} -E cat
         ${CMAKE_CURRENT_BINARY_DIR}/CudaTile.md
         ${CMAKE_CURRENT_BINARY_DIR}/CudaTileOps.md
@@ -73,7 +78,7 @@ set(LLVM_TARGET_DEFINITIONS Ops.td)
 tablegen(CUDA_TILE ops.rst -gen-op-spec -examples-directory ${GEN_SPEC_DIR}/examples)
 
 add_custom_command(
-       OUTPUT ${GEN_SPEC_DIR}/ops.rst
+        OUTPUT ${GEN_SPEC_DIR}/ops.rst
         COMMAND ${CMAKE_COMMAND} -E cat
         ${CMAKE_CURRENT_BINARY_DIR}/ops.rst
         > ${GEN_SPEC_DIR}/ops.rst

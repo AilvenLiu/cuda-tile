@@ -1,4 +1,4 @@
-//===- cuda-tile-tblgen.cpp -------------------------------------*- C++ -*-===//
+//===- cuda-tile-tblgen.cpp - CUDA Tile dialect tblgen ----------*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file contains the main function for generating the CUDA Tile spec from
+// This file contains the main function for generating the CudaTile spec from
 // MLIR.
 //
 //===----------------------------------------------------------------------===//

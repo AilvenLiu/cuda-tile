@@ -23,10 +23,16 @@ configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py
 )
 
-add_subdirectory(CAPI)
+if(CUDA_TILE_ENABLE_CAPI)
+  add_subdirectory(CAPI)
+endif()
+
+# Include the test passes.
+add_subdirectory(lib)
 
 set(MLIR_TEST_DEPENDS
   FileCheck
+  not
   cuda-tile-opt
   cuda-tile-optimize
   cuda-tile-translate
@@ -48,7 +54,7 @@ add_custom_target(check-cuda-tile-build-only
 add_lit_testsuite(check-cuda-tile "Running the cuda_tile regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${MLIR_TEST_DEPENDS}
-  )
+)
 set_target_properties(check-cuda-tile PROPERTIES FOLDER "Tests")
 
 add_lit_testsuites(cuda_tile ${CMAKE_CURRENT_SOURCE_DIR}
@@ -56,4 +62,6 @@ add_lit_testsuites(cuda_tile ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Install the CAPI test binaries.
-install(TARGETS ${CAPI_TEST_TARGETS} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(CUDA_TILE_ENABLE_CAPI)
+  install(TARGETS ${CAPI_TEST_TARGETS} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()

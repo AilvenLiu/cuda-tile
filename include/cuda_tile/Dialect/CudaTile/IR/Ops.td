@@ -40,6 +40,10 @@ defvar token_desc = "The optional token for operation ordering.";
 defvar rounding_mode_desc = "The rounding mode for the operation.";
 defvar cannonical_nan_desc = "When set, :code:`maxf` (or :code:`minf`) returns a :code:`NaN` if either of the two compared elements is :code:`NaN`.";
 defvar overflow_desc = "The overflow behavior of the operation.";
+defvar fast_accumulation_desc = !strconcat("\n", "Enable faster but less precise FP8 MMA on Hopper GPUs. "
+  "Native Hopper FP8 accumulation uses an intermediate precision that is larger than half-precision (F16), but less than full precision (F32). "
+  "When the flag is true, rely on native accumulation for faster execution. When false, intermediate results will be periodically promoted "
+  "to a higher precision, causing modest performance degradation but providing higher accuracy.");
 
 // NB: any suffix text prefix with :suffix so the RST emitter can normalize
 // the white space.
@@ -48,17 +52,17 @@ defvar overflow_desc = "The overflow behavior of the operation.";
 defvar integer_arith_suffix = !strconcat("\n",
   ":suffix: Element-wise integer arithmetic operations are performed by the target architecture's native ",
   "integer instructions. The default semantics are wrap-around semantics on overflow or underflow. ",
-  "See :ref:`sub-section-integer-arithmetic` for more details.");
+  "See :ref:`op-group-integer` for more details.");
 
 defvar floating_point_arith_suffix = !strconcat("\n",
   ":suffix: Element-wise floating-point arithmetic operations are performed by the target architecture's native ",
   "floating-point instructions. If the :code:`rounding` modifier is specified, the particular rounding mode will be applied "
-  "to each element of the result. See :ref:`sub-section-floating-point-arithmetic` for more details.");
+  "to each element of the result. See :ref:`op-group-floating-point` for more details.");
 
 // Math Suffixes
 defvar floating_point_math_suffix = !strconcat("\n",
   ":suffix: This operation is emulated in :code:`f32` when executed on half-precision "
-  "inputs (:code:`f16` and :code:`bf16`). See :ref:`sub-section-floating-point-math` for more details."
+  "inputs (:code:`f16` and :code:`bf16`). See :ref:`op-group-floating-point` for more details."
 );
 
 // Rounding Mode Suffix
@@ -71,7 +75,7 @@ defvar rounding_mode_suffix = !strconcat("\n",
 // AbsFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_AbsFOp : CudaTileFArithOpDef<"absf", "13.1",
+def CudaTile_AbsFOp : CudaTileFloatingPointOpDef<"absf", "13.1",
     [Pure, SameOperandsAndResultShape, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise floating-point absolute value";
   let description = !strconcat([{
@@ -92,7 +96,7 @@ def CudaTile_AbsFOp : CudaTileFArithOpDef<"absf", "13.1",
 // AbsIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_AbsIOp : CudaTileIArithOpDef<"absi", "13.1",
+def CudaTile_AbsIOp : CudaTileIntegerOpDef<"absi", "13.1",
     [Pure, SameOperandsAndResultShape, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise integer absolute value";
   let description = !strconcat([{
@@ -116,7 +120,7 @@ def CudaTile_AbsIOp : CudaTileIArithOpDef<"absi", "13.1",
 // AddIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_AddIOp : CudaTileIArithOpDef<"addi", "13.1",
+def CudaTile_AddIOp : CudaTileIntegerOpDef<"addi", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer addition";
   let description = !strconcat([{
@@ -139,7 +143,7 @@ def CudaTile_AddIOp : CudaTileIArithOpDef<"addi", "13.1",
 // AddFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_AddFOp : CudaTileFArithOpDef<"addf", "13.1",
+def CudaTile_AddFOp : CudaTileFloatingPointOpDef<"addf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point addition";
   let description = !strconcat([{
@@ -185,7 +189,7 @@ def CudaTile_AddFOp : CudaTileFArithOpDef<"addf", "13.1",
 // AndIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_AndIOp : CudaTileBArithOpDef<"andi", "13.1",
+def CudaTile_AndIOp : CudaTileBitwiseOpDef<"andi", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise bitwise logical AND";
   let description = !strconcat([{
@@ -237,6 +241,56 @@ def CudaTile_AssertOp : CudaTileControlFlowOpDef<"assert", "13.1"> {
   let assemblyFormat = [{
     $condition `,` $message attr-dict `:` custom<CudaTileType>(type($condition))
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// AllocaOp
+//===----------------------------------------------------------------------===//
+
+// Naming convention see: https://docs.nvidia.com/cuda/parallel-thread-execution/#state-spaces
+defvar alloca_is_global_address =
+  "Optional tag: marks the returned address as shareable across tile threads; "
+  "if omitted, the address is private to the current tile thread (within the "
+  "lifetime of the alloca)";
+
+def CudaTile_AllocaOp : CudaTileMemOpDef<"alloca", "13.3"> {
+  let summary = "Automatic memory allocation";
+  let description = [{
+    Allocates memory sufficient to hold :code:`num_elem` elements and returns a
+    pointer to the allocated memory, or trap if the request cannot be
+    satisfied. The returned address is guaranteed to be aligned to :code:`alignment`
+    bytes, which must be a non-zero power of two. By default, the returned address is
+    valid only within the context of the current tile thread. If the :code:`global`
+    attribute is set, the address may be also be accessed by other tile threads.
+    The lifetime of the allocation is limited to the block in which the alloca resides.
+  }];
+  let arguments = (ins
+    CudaTileArg<ConfinedAttr<I64Attr, [IntMinValue<0>]>, "The number of elements to allocate.", "13.3">:$num_elem,
+    CudaTileArg<ConfinedAttr<I64Attr, [IntMinValue<0>]>, "The alignment of the allocated memory.", "13.3">:$alignment,
+    CudaTileArg<UnitAttr, alloca_is_global_address, "13.3">:$global
+  );
+  let results = (
+    outs CudaTileArg<CudaTile_ScalarTileOf<CudaTile_PointerType>,
+                    "The result tile of pointer.", "13.3">:$result
+  );
+
+  let assemblyFormat = [{
+    `num_elem` `=` $num_elem `,` `alignment` `=` $alignment
+    (`global` $global^)?
+    attr-dict `:` custom<CudaTileType>(type($result))
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @ex_module {
+      # entry @alloca_kernel() {
+        %0 = alloca num_elem = 64, alignment = 128 : tile<ptr<f32>>
+
+        %1 = alloca num_elem = 64, alignment = 128 global : tile<ptr<f32>>
+      # }
+    # }
+  }]];
+
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -296,20 +350,21 @@ def CudaTile_AssumeOp : CudaTileMiscOpDef<"assume", "13.1",
   let results = (outs CudaTileArg<AnyType, "The value with the attached predicate.", "13.1">:$result);
   let assemblyFormat = "custom<AssumePredicate>($predicate) `,` $value  attr-dict `:` custom<CudaTileType>(type($value))";
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//
 // Atan2Op
 //===----------------------------------------------------------------------===//
 
-def CudaTile_Atan2Op : CudaTileMathOpDef<"atan2", "13.2", [
+def CudaTile_Atan2Op : CudaTileFloatingPointOpDef<"atan2", "13.2", [
     Pure, AllTypesMatch<["x", "y", "result"]>
   ]> {
   let summary = "Element-wise atan2";
   let description = !strconcat([{
-    The :code:`atan2` operation calculates the principal value 
-    of the arc tangent of the ratio of first and second input 
-    arguments x / y. The quadrant of the result is determined 
+    The :code:`atan2` operation calculates the principal value
+    of the arc tangent of the ratio of first and second input
+    arguments x / y. The quadrant of the result is determined
     by the signs of inputs x and y.
 
     .. math::
@@ -385,12 +440,12 @@ def CudaTile_AtomicCASTkoOp : CudaTileAtomicsOpDef<"atomic_cas_tko", "13.1", [
     constrained by tokens.
 
     Supported data types:
-      - i32, i64: signed integers
+      - i32, i64: integer values
       - f32, f64: floating-point values
 
     For floating-point types, the comparison uses bitwise equality rather than
-    IEEE-754 semantics. This means different NaN bit patterns are treated as
-    distinct values, and +0.0 and -0.0 are considered different if their bit
+    IEEE-754 semantics. This means different :code:`NaN` bit patterns are treated as
+    distinct values, and :code:`+0.0` and :code:`-0.0` are considered different if their bit
     representations differ.
   }];
 
@@ -503,12 +558,16 @@ def CudaTile_AtomicRMWTkoOp : CudaTileAtomicsOpDef<"atomic_rmw_tko", "13.1", [
     Supported data types by :code:`mode`:
 
       - ADD, AND, MAX, MIN, OR, UMAX, UMIN, XOR: i32, i64
-      - ADDF: f16, f32, f64
+      - ADDF: f16, bf16, f32, f64
       - XCHF: i32, i64, f32, f64
 
     The :code:`U` prefix in UMAX and UMIN distinguishes these from their
     signed counterparts (MAX and MIN) by interpreting the comparison as
     unsigned.
+
+    .. note::
+    :code:`bf16` is supported from Hopper (sm90) onward. On earlier architectures
+    (e.g. Ampere/sm80), atomicRMW ADDF with bf16 is not supported.
   }];
 
   let mlirExamples = [[{
@@ -568,6 +627,121 @@ def CudaTile_AtomicRMWTkoOp : CudaTileAtomicsOpDef<"atomic_rmw_tko", "13.1", [
 }
 
 //===----------------------------------------------------------------------===//
+// AtomicRedViewTkoOp
+//===----------------------------------------------------------------------===//
+
+def CudaTile_AtomicRedViewTkoOp : CudaTileAtomicsOpDef<"atomic_red_view_tko", "13.3",
+    [AttrSizedOperandSegments]> {
+  let summary = "View-based atomic reduction on global memory";
+
+  let description = [{
+    The :code:`atomic_red_view_tko` operation performs element-wise atomic
+    read-modify-write operations on global memory. The tile identified by
+    :code:`index` within :code:`view` is the destination; :code:`value`
+    provides the operand for each element. Unlike :code:`atomic_rmw_tko`,
+    this operation does not return the original values from memory.
+
+    A view is a mapping from view-space indices to tiles. For example, a
+    :ref:`type-partition_view` partitions a :ref:`type-tensor_view` into a
+    grid of equally sized tiles. The :code:`index` operands select which tile
+    in that grid to reduce into, and must match the rank of the view's index
+    space. The :code:`index` operands are interpreted as unsigned integers.
+
+    The :code:`view` must be a :ref:`type-partition_view` or
+    :ref:`type-strided_view`; :ref:`type-gather_scatter_view` is not
+    supported. Views with a :code:`padding_value` are not supported.
+
+    The element type of :code:`value` must match the element type of
+    :code:`view`, and the tile shape of :code:`value` must match the tile
+    shape of :code:`view`. Each :code:`index` operand must be a scalar
+    (rank-0) integer tile. Each element is updated atomically:
+
+    .. code-block:: text
+
+      ∀ (i, j, …) ∈ shape(value):
+          view[index][i,j,…] := mode(view[index][i,j,…], value[i,j,…])   (atomically)
+
+    The original value at each location is not returned; use :code:`atomic_rmw_tko`
+    if the original values are needed.
+
+    Supported data types by :code:`mode`:
+
+      - ADD, AND, MAX, MIN, OR, UMAX, UMIN, XOR: i32, i64
+      - ADDF: f16, bf16, f32, f64
+
+    The :code:`U` prefix in UMAX and UMIN distinguishes these from their
+    signed counterparts (MAX and MIN) by interpreting the comparison as
+    unsigned.
+
+    .. note::
+    :code:`bf16` is supported from Hopper (sm90) onward. On earlier architectures
+    (e.g. Ampere/sm80), atomicRMW ADDF with bf16 is not supported.
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @module {
+    #   entry @example(%ptr: tile<ptr<f32>>) {
+          // Create a view over an 8192x128 f32 matrix in global memory.
+          // %ptr points to the base of the matrix (row-major, 128 columns).
+          %tensor_view = make_tensor_view %ptr, shape=[8192, 128], strides=[128, 1]
+            : tensor_view<8192x128xf32, strides=[128,1]>
+
+          // Partition the matrix into a grid of 64x64 tiles.
+          // This creates a (8192/64) x (128/64) = 128x2 grid of tiles,
+          // each addressable by a 2D integer index (row_tile, col_tile).
+          %view = make_partition_view %tensor_view :
+            partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>
+
+          // Tile indices used to select which partition to reduce into.
+          %c0 = constant <i32: 0> : tile<i32>
+          %c1 = constant <i32: 1> : tile<i32>
+
+          // The local contribution to accumulate (64x64 tile of f32 values)
+          %local_contribution = constant <f32: 1.0> : tile<64x64xf32>
+
+          // Atomically accumulate local_contribution into tile (0,0):
+          // the 64x64 region at rows [0,64), cols [0,64) of the global matrix.
+          %t0 = atomic_red_view_tko relaxed device %view[%c0, %c0], addf, %local_contribution
+            : tile<64x64xf32>, partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>, tile<i32> -> token
+
+          // Atomically accumulate into tile (0,1):
+          // the 64x64 region at rows [0,64), cols [64,128) of the global matrix.
+          %t1 = atomic_red_view_tko relaxed device %view[%c0, %c1], addf, %local_contribution
+            : tile<64x64xf32>, partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>, tile<i32> -> token
+
+          // Same reduction with an input token to enforce ordering with a
+          // prior operation (e.g. ensure %t1 completes before this starts).
+          %token = make_token : token
+          %t2 = atomic_red_view_tko relaxed device %view[%c0, %c1], addf, %local_contribution token = %token
+            : tile<64x64xf32>, partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>, tile<i32> -> token
+    #   }
+    # }
+  }]];
+
+  let arguments = (ins
+    CudaTileArg<
+      CudaTile_MemoryOrderingSemanticsAttr,
+      "The memory ordering semantics for the atomic operation.",
+      "13.3",
+      [OnlyVariants<["RELAXED"]>]>:$memory_ordering_semantics,
+    CudaTileArg<CudaTile_MemoryScopeAttr, "The memory scope for the atomic operation.", "13.3",
+      [OnlyVariants<["TL_BLK", "DEVICE"]>]>:$memory_scope,
+    CudaTileArg<CudaTile_TileView, "Destination view", "13.3">:$view,
+    CudaTileArg<Variadic<CudaTile_IntTileType>,
+      "The n-dimensional index of the tile to reduce into.", "13.3">:$index,
+    CudaTileArg<CudaTile_AtomicRMWModeAttr, "RMW mode", "13.3",
+      [OnlyVariants<["AND", "OR", "XOR", "ADD", "ADDF", "MAX", "MIN", "UMAX", "UMIN"]>]>:$mode,
+    CudaTileArg<CudaTile_TileType, "Value tile for atomic operation", "13.3">:$value,
+    CudaTileArg<Optional<CudaTile_TokenType>, "Input token", "13.3">:$token
+  );
+
+  let results = (outs CudaTileArg<CudaTile_TokenType, "Result token", "13.3">:$result_token);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // BitcastOp
 //===----------------------------------------------------------------------===//
 
@@ -597,7 +771,7 @@ def CudaTile_BitcastOp : CudaTileConversionOpDef<"bitcast", "13.1", [
 // BroadcastOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_BroadcastOp : CudaTileTileOpDef<"broadcast", "13.1",
+def CudaTile_BroadcastOp : CudaTileCoreOpDef<"broadcast", "13.1",
     [Pure, SameOperandsAndResultElementType,
      AllRanksMatch<["source", "result"]>,
      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
@@ -628,7 +802,7 @@ def CudaTile_BroadcastOp : CudaTileTileOpDef<"broadcast", "13.1",
 // CatOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CatOp : CudaTileTileOpDef<"cat", "13.1",
+def CudaTile_CatOp : CudaTileCoreOpDef<"cat", "13.1",
     [Pure, AllRanksMatch<["lhs", "rhs", "result"]>,
      AllElementTypeMatch<"all of {lhs, rhs, result} have the same element type", ["lhs", "rhs", "result"]>]> {
   let summary = "Concatenate tiles along specified dimension";
@@ -704,7 +878,7 @@ def CudaTile_CatOp : CudaTileTileOpDef<"cat", "13.1",
 // CosOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CosOp : CudaTileMathOpDef<"cos", "13.1",
+def CudaTile_CosOp : CudaTileFloatingPointOpDef<"cos", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise cosine";
   let description = !strconcat([{
@@ -737,7 +911,7 @@ def CudaTile_CosOp : CudaTileMathOpDef<"cos", "13.1",
 // CosHOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CosHOp : CudaTileMathOpDef<"cosh", "13.1",
+def CudaTile_CosHOp : CudaTileFloatingPointOpDef<"cosh", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise hyperbolic cosine";
   let description = !strconcat([{
@@ -823,7 +997,7 @@ def CudaTile_BreakOp : CudaTileControlFlowOpDef<"break", "13.1", [
 // CeilOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CeilOp : CudaTileMathOpDef<"ceil", "13.1",
+def CudaTile_CeilOp : CudaTileFloatingPointOpDef<"ceil", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise ceiling";
   let description = [{
@@ -857,7 +1031,7 @@ def CudaTile_CeilOp : CudaTileMathOpDef<"ceil", "13.1",
 // CmpFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CmpFOp : CudaTileTileOpDef<"cmpf", "13.1", [Pure, AllTypesMatch<["lhs", "rhs"]>, TypesMatchWith<
+def CudaTile_CmpFOp : CudaTileFloatingPointOpDef<"cmpf", "13.1", [Pure, AllTypesMatch<["lhs", "rhs"]>, TypesMatchWith<
     "Result type has i1 element type and same shape as operands",
     "lhs", "result", "::getI1SameShape($_self)">]> {
   let summary = "Element-wise floating-point comparison";
@@ -919,7 +1093,7 @@ def CudaTile_CmpFOp : CudaTileTileOpDef<"cmpf", "13.1", [Pure, AllTypesMatch<["l
 // CmpIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_CmpIOp : CudaTileTileOpDef<"cmpi", "13.1", [Pure, AllTypesMatch<["lhs", "rhs"]>, TypesMatchWith<
+def CudaTile_CmpIOp : CudaTileIntegerOpDef<"cmpi", "13.1", [Pure, AllTypesMatch<["lhs", "rhs"]>, TypesMatchWith<
     "Result type has i1 element type and same shape as operands",
     "lhs", "result", "::getI1SameShape($_self)">]> {
   let summary = "Element-wise integer comparison";
@@ -980,7 +1154,7 @@ def CudaTile_CmpIOp : CudaTileTileOpDef<"cmpi", "13.1", [Pure, AllTypesMatch<["l
 // ConstantOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ConstantOp : CudaTileTileOpDef<"constant", "13.1",
+def CudaTile_ConstantOp : CudaTileCoreOpDef<"constant", "13.1",
     [ConstantLike, Pure,  AllTypesMatch<["value", "result"]>,
      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Construct a constant tile";
@@ -1185,7 +1359,7 @@ def CudaTile_GetTensorShapeOp :
 // DivFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_DivFOp : CudaTileFArithOpDef<"divf", "13.1",
+def CudaTile_DivFOp : CudaTileFloatingPointOpDef<"divf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point division";
   let description = !strconcat([{
@@ -1239,7 +1413,7 @@ def CudaTile_DivFOp : CudaTileFArithOpDef<"divf", "13.1",
 // DivIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_DivIOp : CudaTileIArithOpDef<"divi", "13.1",
+def CudaTile_DivIOp : CudaTileIntegerOpDef<"divi", "13.1",
     [NoMemoryEffect, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer division";
   let description = !strconcat([{
@@ -1277,15 +1451,14 @@ def CudaTile_DivIOp : CudaTileIArithOpDef<"divi", "13.1",
 
 def MmaFOp_OperandTileType : CudaTile_TileOf<[CudaTile_Float16, CudaTile_BFloat16, CudaTile_Float32,
                                             CudaTile_Float64, CudaTile_TFloat32, CudaTile_Float8E4M3FN,
-                                            CudaTile_Float8E5M2,
-                                            ],
+                                            CudaTile_Float8E5M2],
                                             [CudaTile_IsTileTypePred],
                                             "mmaf operand tile type">;
 def MmaFOp_ResultTileType : CudaTile_TileOf<[CudaTile_Float16, CudaTile_Float32, CudaTile_Float64],
                                            [CudaTile_IsTileTypePred],
                                            "mmaf acc/result tile type">;
 
-def CudaTile_MmaFOp : CudaTileTileOpDef<"mmaf", "13.1",
+def CudaTile_MmaFOp : CudaTileFloatingPointOpDef<"mmaf", "13.1",
     [Pure, AllTypesMatch<["acc", "result"]>,
      AllElementTypeMatch<"all of {lhs, rhs} have the same element type", ["lhs", "rhs"]>,
      AllRanksMatch<["lhs", "rhs", "acc"]>]> {
@@ -1348,12 +1521,97 @@ def CudaTile_MmaFOp : CudaTileTileOpDef<"mmaf", "13.1",
 
   let arguments = (ins CudaTileArg<MmaFOp_OperandTileType, "The left hand side matrix operand.", "13.1">:$lhs,
                    CudaTileArg<MmaFOp_OperandTileType, "The right hand side matrix operand.", "13.1">:$rhs,
-                   CudaTileArg<MmaFOp_ResultTileType, "The accumulator matrix operand.", "13.1">:$acc);
+                   CudaTileArg<MmaFOp_ResultTileType, "The accumulator matrix operand.", "13.1">:$acc,
+                   CudaTileArg<UnitAttr, fast_accumulation_desc, "13.3">:$fast_acc);
   let results = (outs CudaTileArg<MmaFOp_ResultTileType, "The result matrix after multiplication and accumulation.", "13.1">:$result);
 
   let assemblyFormat = [{
-    $lhs `,` $rhs `,` $acc attr-dict `:`
+    $lhs `,` $rhs `,` $acc
+    (`fast_acc` $fast_acc^)?
+    attr-dict `:`
     custom<CudaTileType>(type($lhs)) `,` custom<CudaTileType>(type($rhs)) `,` custom<CudaTileType>(type($acc))
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// MmaFScaledOp
+//===----------------------------------------------------------------------===//
+
+def MmaFScaledOp_OperandTileType : CudaTile_TileOf<[CudaTile_Float8E4M3FN,
+                                                    CudaTile_Float8E5M2,
+                                                    CudaTile_Float4E2M1FN],
+                                                    [CudaTile_IsTileTypePred],
+                                                    "mmaf_scaled operand tile type">;
+def MmaFScaledOp_ScaleTileType : CudaTile_TileOf<[CudaTile_Float8E4M3FN,
+                                                  CudaTile_Float8E8M0FNU],
+                                                  [CudaTile_IsTileTypePred],
+                                                   "mmaf_scaled scale tile type">;
+def MmaFScaledOp_ResultTileType : CudaTile_TileOf<[CudaTile_Float32],
+                                                   [CudaTile_IsTileTypePred],
+                                                   "mmaf_scaled result tile type">;
+
+def CudaTile_MmaFScaledOp : CudaTileFloatingPointOpDef<"mmaf_scaled", "13.3",
+    [Pure, AllTypesMatch<["acc", "result"]>,
+     AllElementTypeMatch<"all of {lhs, rhs} have the same element type", ["lhs", "rhs"]>,
+     AllElementTypeMatch<"all of {lhs_scale, rhs_scale} have the same element type", ["lhs_scale", "rhs_scale"]>,
+     AllRanksMatch<["lhs", "rhs", "acc", "lhs_scale", "rhs_scale"]>]> {
+  let summary = "Floating-point matrix-multiply-accumulate with scaled inputs";
+
+  let description = [{
+    The :code:`mmaf_scaled` operation is a variant of the floating-point MMA operation (see :ref:`op-cuda_tile.mmaf`)
+    for low-precision input types that use block scaling. In addition to the normal MMA operands, it takes two additional
+    operands: :code:`$lhs_scale` and :code:`$rhs_scale`, which are the scale factors for the left hand side and right hand side operands,
+    respectively. Each element of the scale factor tiles are used to scale a block of continuous elements along the K dimension
+    in the corresponding input tile.
+
+    Conceptually, the operation is equivalent to broadcasting :code:`lhs_scale` and :code:`rhs_scale` along the K dimension to match the shape
+    of the left hand side and right hand side operands, performing the elementwise multiplications :code:`lhs*sfa` and :code:`rhs*sfb`,
+    and then performing the standard MMA on the scaled tiles.
+
+    .. math::
+      \text{mmaf_scaled}(lhs, rhs, acc, lhs\_scale, rhs\_scale)_{i,j} = \sum_{k=0}^{K-1} (lhs_{i,k}*lhs\_scale_{i,k/V}) \times (rhs_{k,j}*rhs\_scale_{k/V,j}) + acc_{i,j}
+
+    where :code:`V` is the scale factor vector (or block) size.
+
+    The same rank and shape constraints apply as for :ref:`op-cuda_tile.mmaf`. The operand types must be a supported combination
+    (see :ref:`table-cuda_tile.mmaf_scaled-0`). :code:`lhs` and :code:`rhs` must be of the same element type.
+    :code:`lhs_scale` and :code:`rhs_scale` must be of the same element type.
+
+    .. note::
+        Not every valid operand and vector size configuration is efficiently supported on all architectures.
+
+    .. note::
+        When using :code:`f8E4M3FN` as the scale type, values must be non-negative. Negative scale values may produce undefined values.
+
+  }];
+
+    let descriptionTables = [
+    Table<":code:`mmaf_scaled` Supported Data Types", "The table below shows the "
+      "supported type and vector size combinations for the :code:`mmaf_scaled` operation.",
+      [TableHeader<":code:`lhs`/:code:`rhs` Element Type", "code">,
+       TableHeader<":code:`lhs_scale`/:code:`rhs_scale` Element Type", "code">,
+       TableHeader<"Output Type", "code">],
+       [
+        TableRow<["f8E4M3FN, f8E5M2, f4E2M1FN", "f8E8M0FNU", "f32"]>,
+        TableRow<["f4E2M1FN", "f8E4M3FN", "f32"]>,
+       ]
+    >
+  ];
+
+  let arguments = (ins CudaTileArg<MmaFScaledOp_OperandTileType, "The left hand side matrix operand.", "13.3">:$lhs,
+                   CudaTileArg<MmaFScaledOp_OperandTileType, "The right hand side matrix operand.", "13.3">:$rhs,
+                   CudaTileArg<MmaFScaledOp_ResultTileType, "The accumulator matrix operand.", "13.3">:$acc,
+                   CudaTileArg<MmaFScaledOp_ScaleTileType, "The left hand side scale operand.", "13.3">:$lhs_scale,
+                   CudaTileArg<MmaFScaledOp_ScaleTileType, "The right hand side scale operand.", "13.3">:$rhs_scale);
+  let results = (outs CudaTileArg<MmaFScaledOp_ResultTileType, "The result matrix after multiplication and accumulation.", "13.3">:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs `,` $acc `,` $lhs_scale `,` $rhs_scale attr-dict `:`
+    custom<CudaTileType>(type($lhs)) `,` custom<CudaTileType>(type($rhs)) `,`
+    custom<CudaTileType>(type($acc)) `,` custom<CudaTileType>(type($lhs_scale)) `,`
+    custom<CudaTileType>(type($rhs_scale))
   }];
 
   let hasVerifier = 1;
@@ -1367,7 +1625,7 @@ def MmaIOp_OperandTileType : CudaTile_TileOf<[CudaTile_Int8],
                                             [CudaTile_IsTileTypePred],
                                             "mmai operand tile type">;
 
-def CudaTile_MmaIOp : CudaTileTileOpDef<"mmai", "13.1",
+def CudaTile_MmaIOp : CudaTileIntegerOpDef<"mmai", "13.1",
     [Pure, AllTypesMatch<["acc", "result"]>,
      AllElementTypeMatch<"all of {lhs, rhs} have the same element type", ["lhs", "rhs"]>,
      AllRanksMatch<["lhs", "rhs", "acc"]>]> {
@@ -1434,7 +1692,7 @@ def CudaTile_MmaIOp : CudaTileTileOpDef<"mmai", "13.1",
 // ExtractOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ExtractOp : CudaTileTileOpDef<"extract", "13.1", [
+def CudaTile_ExtractOp : CudaTileCoreOpDef<"extract", "13.1", [
     Pure, AllRanksMatch<["source", "result"]>
   ]> {
   let summary = "Extract a subtile from a tile";
@@ -1488,13 +1746,21 @@ def CudaTile_ExtractOp : CudaTileTileOpDef<"extract", "13.1", [
 // ExpOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ExpOp : CudaTileMathOpDef<"exp", "13.1", [
+def CudaTile_ExpOp : CudaTileFloatingPointOpDef<"exp", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise exponential";
   let description = !strconcat([{
     The :code:`exp` operation computes the element-wise exponential of the input
-    floating-point tile.
+    floating-point tile. Default rounding mode is `full`.
+
+    The :code:`full` rounding mode relies on the CUDA Math API. For more details please refer to
+    the CUDA Programming Guide: https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/mathematical-functions.html#cuda-c-mathematical-standard-library-functions.
+    Exponential functions provided by the CUDA Math API are supported for the float and double data types only,
+    support for other data types is not guaranteed.
+
+    The :code:`approx` rounding mode enables fast hardware-level approximation
+    using exp2 with log2(e) scaling.
 
     .. math::
 
@@ -1502,11 +1768,22 @@ def CudaTile_ExpOp : CudaTileMathOpDef<"exp", "13.1", [
 
   }], floating_point_math_suffix);
 
-  let arguments = (ins CudaTileArg<CudaTile_BaseFloatTileType, "The input float tile.", "13.1">:$source);
+  let descriptionTables = [
+    Table<":code:`exp` Modifiers", "The below table shows the supported modifiers for each data type. Entries with '*' are emulated in f32.",
+      [TableHeader<"Modifier", "code">, TableHeader<"Float32">, TableHeader<"Float64">, TableHeader<"BFloat16">, TableHeader<"Float16">],
+      [TableRow<["approx", "yes", "no", "no", "no"]>,
+       TableRow<["full", "yes", "yes", "yes*", "yes*"]>]
+    >
+  ];
+
+  let arguments = (ins CudaTileArg<CudaTile_BaseFloatTileType, "The input float tile.", "13.1">:$source,
+                       CudaTileArg<DefaultValuedAttr<CudaTile_RoundingModeAttr, "RoundingMode::FULL">, rounding_mode_desc, "13.3">:$rounding_mode);
   let results = (outs CudaTileArg<CudaTile_BaseFloatTileType, "The exponential of the input tile.", "13.1">:$result);
 
   let assemblyFormat = [{
-    $source attr-dict `:` custom<CudaTileType>(type($result))
+    $source
+    custom<ExpOpRoundingMode>($rounding_mode)
+    attr-dict `:` custom<CudaTileType>(type($result))
   }];
 
   let mlirExamples = [[{
@@ -1514,9 +1791,12 @@ def CudaTile_ExpOp : CudaTileMathOpDef<"exp", "13.1", [
       # entry @example_exp() {
         %in = constant <f32: [0.0, 1.0, 2.0, 3.0]> : tile<4xf32>
         %res = exp %in : tile<4xf32>
+        %res_approx = exp %in rounding<approx> : tile<4xf32>
       # }
     # }
   }]];
+
+  let hasVerifier = 1;
 }
 
 
@@ -1524,7 +1804,7 @@ def CudaTile_ExpOp : CudaTileMathOpDef<"exp", "13.1", [
 // Exp2Op
 //===----------------------------------------------------------------------===//
 
-def CudaTile_Exp2Op : CudaTileMathOpDef<"exp2", "13.1", [
+def CudaTile_Exp2Op : CudaTileFloatingPointOpDef<"exp2", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise power of two";
@@ -1570,6 +1850,10 @@ def CudaTile_Exp2Op : CudaTileMathOpDef<"exp2", "13.1", [
 // ExtIOp
 //===----------------------------------------------------------------------===//
 
+// IntTileType + Int4
+def ExtIOp_IntegerType : CudaTile_TileOf<
+  !listconcat(CudaTile_IntTileType.allowedElementTypes, [CudaTile_Int4])>;
+
 def CudaTile_ExtIOp : CudaTileConversionOpDef<"exti", "13.1", [
     Pure, AllShapesMatch<["from", "to"]>]> {
   let summary = "Extend the width of an integer tile";
@@ -1581,9 +1865,9 @@ def CudaTile_ExtIOp : CudaTileConversionOpDef<"exti", "13.1", [
     integers.
   }];
 
-  let arguments = (ins CudaTileArg<CudaTile_IntTileType, "The input integer tile to extend.", "13.1">:$from,
+  let arguments = (ins CudaTileArg<ExtIOp_IntegerType, "The input integer tile to extend.", "13.1">:$from,
                        CudaTileArg<CudaTile_SignednessAttr, signed_attr_desc, "13.1">:$signedness);
-  let results = (outs CudaTileArg<CudaTile_IntTileType, "The extended integer tile.", "13.1">:$to);
+  let results = (outs CudaTileArg<ExtIOp_IntegerType, "The extended integer tile.", "13.1">:$to);
 
   let hasVerifier = 1;
   let assemblyFormat = [{
@@ -1644,8 +1928,8 @@ def CudaTile_ForOp : CudaTileControlFlowOpDef<"for", "13.1", [
     loop-carried values yielded by the previous loop iteration.
 
     The loop terminates when the induction variable is greater than or equal to
-    :code:`upperBound`. By default, signed comparison is used between the 
-    upperBound and the induction variable. To use unsigned comparison instead, 
+    :code:`upperBound`. By default, signed comparison is used between the
+    upperBound and the induction variable. To use unsigned comparison instead,
     specify the optional :code:`unsigned` unit attribute.
 
     The body of the loop must be terminated by a :ref:`op-cuda_tile.continue` that yields
@@ -1697,7 +1981,7 @@ def CudaTile_ForOp : CudaTileControlFlowOpDef<"for", "13.1", [
   let skipDefaultBuilders = 1;
   let builders = [
     OpBuilder<(ins "Value":$lowerBound, "Value":$upperBound, "Value":$step,
-      CArg<"ValueRange", "ValueRange()">:$initArgs,
+      CArg<"ValueRange", "{}">:$initArgs,
       CArg<"function_ref<void(OpBuilder &, Location, Value, ValueRange)>",
            "nullptr">,
       CArg<"bool", "false">:$unsignedCmp)>
@@ -1735,7 +2019,7 @@ def CudaTile_ForOp : CudaTileControlFlowOpDef<"for", "13.1", [
 // FloorOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_FloorOp : CudaTileFArithOpDef<"floor", "13.1", [
+def CudaTile_FloorOp : CudaTileFloatingPointOpDef<"floor", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise floor rounding";
@@ -1773,7 +2057,7 @@ def CudaTile_FmaTile : CudaTile_TileOf<[CudaTile_Float16,
                                         CudaTile_Float32,
                                         CudaTile_Float64]>;
 
-def CudaTile_FmaOp : CudaTileFArithOpDef<"fma", "13.1",
+def CudaTile_FmaOp : CudaTileFloatingPointOpDef<"fma", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "acc", "result"]>]> {
   let summary = "Floating point fused multipy-add";
   let description = [{
@@ -1826,7 +2110,8 @@ def CudaTile_FToFOp : CudaTileConversionOpDef<"ftof", "13.1", [
     The source type and the result type must be different.
 
     The :code:`rounding_mode` attribute specifies the rounding behavior for the operation.
-    Only :code:`NEAREST_EVEN` rounding mode is supported.
+    For conversion to :code:`f8E8M0FNU`, only :code:`ZERO` and :code:`POSITIVE_INF` rounding
+    modes are supported. Otherwise, only :code:`NEAREST_EVEN` rounding mode is supported.
   }];
 
   let arguments = (ins
@@ -1860,8 +2145,11 @@ def CudaTile_FToIOp : CudaTileConversionOpDef<"ftoi", "13.1", [
 
     .. warning::
 
-      If the input floating-point value is outside the (signed or unsigned) range
-      of the output integer, behavior is undefined.
+      If the input floating-point value is :code:`Inf` or :code:`NaN`, or,
+      after rounding, is outside the representable range of the target integer
+      type, using the returned value is undefined behavior. Users must ensure
+      that input values are finite and within the representable range of the
+      target type.
   }];
 
   let arguments = (ins CudaTileArg<CudaTile_FloatTileType, "The input floating-point tile.", "13.1">:$from,
@@ -2017,6 +2305,7 @@ def CudaTile_GetNumTileBlocksOp : CudaTileCoreOpDef<"get_num_tile_blocks", "13.1
       # cuda_tile.module @module {
         entry @example() {
           %x, %y, %z = get_num_tile_blocks : tile<i32>
+          // print "x: %, y: %, z: %\n", %x, %y, %z : tile<i32>, tile<i32>, tile<i32>
         }
       # }
     }]];
@@ -2080,21 +2369,40 @@ def CudaTile_GlobalOp : CudaTileCoreOpDef<"global", "13.1", [Symbol]> {
     As globals are defined at the module scope their names are globally unique symbols and must not collide with any other
     symbol in the module.
 
+    The :code:`symbol_visibility` attribute controls the visibility and accessibility of the global variable.
+    When not explicitly specified, it defaults to :code:`public`:
+    - :code:`public` (default): Accessible from host code, never eliminated
+    - :code:`private`: Device-only access, enables aggressive optimization
+
+    The optional :code:`constant` attribute marks the global as immutable during the execution of a kernel, allowing the compiler
+    to place it in read-only memory and enable additional optimizations. Defaults to false (mutable).
+
     For more detailed semantics of global variables see :ref:`sub_sec_tile_global`.
   }];
 
   let mlirExamples = [[{
     # cuda_tile.module @module {
+        // Default public visibility (implicit)
         global @val alignment = 128 <f32: [0.1, 0.2, 0.3, 0.4]> : tile<4xf32>
+        // Explicit public visibility (same as default)
+        global public @host_accessible <f32: [1.0, 2.0]> : tile<2xf32>
+        // Device-only optimization
+        global private @device_only <i32: [42]> : tile<i32>
+        // Read-only/constant global allocation
+        global constant @val alignment = 128 <f32: [0.1, 0.2, 0.3, 0.4]> : tile<4xf32>
+        // Device-only, read-only/constant global allocation
+        global private constant @device_only <i32: [42]> : tile<i32>
         entry @example() {}
     # }
   }]];
 
   let arguments = (ins CudaTileArg<SymbolNameAttr, "The name of the global variable.", "13.1">:$sym_name,
                        CudaTileArg<Builtin_DenseTypedElementsAttr, "The value to initialize the allocation with.", "13.1">:$value,
-                       CudaTileArg<DefaultValuedAttr<I64Attr, "0">, "The alignment of the buffer.", "13.1">:$alignment);
+                       CudaTileArg<DefaultValuedAttr<I64Attr, "0">, "The alignment of the buffer.", "13.1">:$alignment,
+                       CudaTileArg<UnitAttr, "Whether the global is constant / read-only.", "13.3">:$constant,
+                       CudaTileArg<DefaultValuedAttr<CudaTile_SymbolVisibilityAttr, "::mlir::cuda_tile::SymbolVisibility::Public">, "The symbol visibility of the global.", "13.3">:$symbol_visibility);
 
-  let assemblyFormat = "$sym_name (`alignment` `=` $alignment^)? attr-dict custom<DenseTypedElementsAttrNoResult>($value)";
+  let assemblyFormat = "custom<SymbolVisibility>($symbol_visibility) (`constant` $constant^)? $sym_name (`alignment` `=` $alignment^)? attr-dict custom<DenseTypedElementsAttrNoResult>($value)";
   let hasVerifier = 1;
 }
 
@@ -2219,7 +2527,7 @@ def CudaTile_IntToPtrOp : CudaTileConversionOpDef<"int_to_ptr", "13.1", [
 // IotaOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_IotaOp : CudaTileTileOpDef<"iota", "13.1", [Pure]> {
+def CudaTile_IotaOp : CudaTileCoreOpDef<"iota", "13.1", [Pure]> {
   let summary = "Generate a 1-d tile range from 0 to n-1";
   let description = [{
     The :code:`iota` operation generates a 1-d tile with a sequence of integer
@@ -2266,6 +2574,10 @@ def CudaTile_JoinTokensOp
 // TruncIOp
 //===----------------------------------------------------------------------===//
 
+// IntTileType + Int4
+def TruncIOp_IntegerType : CudaTile_TileOf<
+  !listconcat(CudaTile_IntTileType.allowedElementTypes, [CudaTile_Int4])>;
+
 def CudaTile_TruncIOp : CudaTileConversionOpDef<"trunci", "13.1", [
     Pure, AllShapesMatch<["from", "to"]>]> {
   let summary = "Truncates the width of an integer tile";
@@ -2280,9 +2592,9 @@ def CudaTile_TruncIOp : CudaTileConversionOpDef<"trunci", "13.1", [
     wrap", the truncated bits must be zero.
   }];
 
-  let arguments = (ins CudaTileArg<CudaTile_IntTileType, "The input integer tile to truncate.", "13.1">:$from,
+  let arguments = (ins CudaTileArg<TruncIOp_IntegerType, "The input integer tile to truncate.", "13.1">:$from,
                        CudaTileArg<DefaultValuedAttr<CudaTile_IntegerOverflowAttr, "::mlir::cuda_tile::IntegerOverflow::NONE">, overflow_desc, "13.1">:$overflow);
-  let results = (outs CudaTileArg<CudaTile_IntTileType, "The truncated integer tile.", "13.1">:$to);
+  let results = (outs CudaTileArg<TruncIOp_IntegerType, "The truncated integer tile.", "13.1">:$to);
 
   let hasVerifier = 1;
   let assemblyFormat = [{
@@ -2303,6 +2615,12 @@ def CudaTile_IToFOp : CudaTileConversionOpDef<"itof", "13.1",
     The :code:`itof` operation converts an integer tile into a float tile.
     In contrast to :ref:`op-cuda_tile.bitcast`, this preserves the numerical value of the tile,
     rounded to the nearest floating-point number of the provided type.
+
+    .. warning::
+
+      If the input integer value, after being rounded, is outside the range
+      of the target floating-point type, it is converted to :code:`Inf` for
+      types that support that value, and :code:`NaN` otherwise.
   }];
 
   let arguments = (ins CudaTileArg<CudaTile_IntTileType, "The input integer tile.", "13.1">:$from,
@@ -2388,6 +2706,31 @@ def CudaTile_LoadViewTkoOp : CudaTileViewOpDef<"load_view_tko", "13.1",
             : partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>, tile<i32> -> tile<64x64xf32>, token
     #   }
     # }
+  }],
+  [{
+    # cuda_tile.module @module {
+    #   entry @example_gather(%ptr: tile<ptr<f32>>) {
+          // Create a tensor view
+          %tensor_view = make_tensor_view %ptr, shape=[8192, 128], strides=[128, 1]
+            : tensor_view<8192x128xf32, strides=[128,1]>
+
+          // Create a gather/scatter view with tile size (64x64) along dimension 0
+          %gsview = make_gather_scatter_view %tensor_view :
+            gather_scatter_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>, sparse_dim=0>
+
+          // The 1D tensor index MUST be at position `sparse_dim` (here sparse_dim=0)
+          // Index at sparse_dim=0: 1D tensor containing gather indices
+          %gather_indices = constant <i32: [0, 10, 20, 30, 40, 50, 60, 70]> : tile<8xi32>
+          // Index at sparse_dim=1: scalar for the other dimension
+          %col_idx = constant <i32: 0> : tile<i32>
+
+          // Load tiles using gather semantics
+          // Index order: [%gather_indices (at sparse_dim=0), %col_idx (at sparse_dim=1)]
+          %gathered_tile, %res_token = load_view_tko weak %gsview[%gather_indices, %col_idx]
+            : gather_scatter_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>, sparse_dim=0>, tile<8xi32>, tile<i32>
+            -> tile<64x64xf32>, token
+    #   }
+    # }
   }]];
 
   let arguments = (ins
@@ -2398,21 +2741,13 @@ def CudaTile_LoadViewTkoOp : CudaTileViewOpDef<"load_view_tko", "13.1",
       [OnlyVariants<["WEAK", "RELAXED", "ACQUIRE"]>]>:$memory_ordering_semantics,
     CudaTileArg<OptionalAttr<CudaTile_MemoryScopeAttr>, "The memory scope for the atomic operation.", "13.1">:$memory_scope,
     CudaTileArg<CudaTile_TileView, "The view from which the tile will be loaded.", "13.1">:$view,
-    CudaTileArg<Variadic<CudaTile_ScalarTileOf<CudaTile_AnyInt>>, "The n-dimensional index of the desired element to load from the view.", "13.1">:$index,
+    CudaTileArg<Variadic<CudaTile_IntTileType>, "The n-dimensional index of the desired element to load from the view.", "13.1">:$index,
     CudaTileArg<Optional<CudaTile_TokenType>, "The optional token for the load operation.", "13.1">:$token,
     CudaTileArg<OptionalAttr<CudaTile_OptimizationHintsAttr>, "Optimization hints for operation", "13.1">:$optimization_hints);
   let results = (outs CudaTileArg<CudaTile_TileType, "The loaded tile.", "13.1">:$tile,
     CudaTileArg<CudaTile_TokenType, "The result token.", "13.1">:$result_token);
 
-  let assemblyFormat = [{
-    custom<MemoryAttributes>($memory_ordering_semantics, $memory_scope)
-    $view `[` $index `]`
-    (`token` `=` $token^)?
-    (`optimization_hints` `=` $optimization_hints^)?
-    attr-dict-with-keyword
-    `:` custom<CudaTileType>(type($view)) `,` custom<CudaTileTypeSplat>(type($index), ref($index))
-    `->` custom<CudaTileType>(type($tile)) `,` custom<CudaTileType>(type($result_token))
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let hasVerifier = 1;
 }
@@ -2534,7 +2869,7 @@ def CudaTile_LoadPtrTkoOp : CudaTile_LoadOpBase<"load_ptr_tko", "13.1"> {
 // LogOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_LogOp : CudaTileMathOpDef<"log", "13.1", [
+def CudaTile_LogOp : CudaTileFloatingPointOpDef<"log", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise natural logarithm";
@@ -2559,7 +2894,7 @@ def CudaTile_LogOp : CudaTileMathOpDef<"log", "13.1", [
 // Log2Op
 //===----------------------------------------------------------------------===//
 
-def CudaTile_Log2Op : CudaTileMathOpDef<"log2", "13.1", [
+def CudaTile_Log2Op : CudaTileFloatingPointOpDef<"log2", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise base-2 logarithm";
@@ -2782,7 +3117,7 @@ def CudaTile_MakeTensorViewOp : CudaTileViewOpDef<"make_tensor_view", "13.1",
 // MaxFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MaxFOp : CudaTileFArithOpDef<"maxf", "13.1",
+def CudaTile_MaxFOp : CudaTileFloatingPointOpDef<"maxf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point maximum";
   let description = [{
@@ -2853,7 +3188,7 @@ def CudaTile_MaxFOp : CudaTileFArithOpDef<"maxf", "13.1",
 // MaxIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MaxIOp : CudaTileIArithOpDef<"maxi", "13.1",
+def CudaTile_MaxIOp : CudaTileIntegerOpDef<"maxi", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer maximum";
   let description = !strconcat([{
@@ -2909,7 +3244,7 @@ def CudaTile_MaxIOp : CudaTileIArithOpDef<"maxi", "13.1",
 // MinFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MinFOp : CudaTileFArithOpDef<"minf", "13.1",
+def CudaTile_MinFOp : CudaTileFloatingPointOpDef<"minf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point minimum";
   let description = [{
@@ -2978,7 +3313,7 @@ def CudaTile_MinFOp : CudaTileFArithOpDef<"minf", "13.1",
 // MinIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MinIOp : CudaTileIArithOpDef<"mini", "13.1",
+def CudaTile_MinIOp : CudaTileIntegerOpDef<"mini", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer minimum";
   let description = !strconcat([{
@@ -3049,8 +3384,12 @@ def CudaTile_ModuleOp : CudaTileCoreOpDef<"module", "13.1", [
 
     The :code:`module` operation is the top-level operation in a |cuda_tile| module and must
     contain only |cuda_tile| operations and no other dialects.
+
+    The optional :code:`producer` attribute contains free-form text identifying what tool
+    generated this module (e.g., compiler version, build options).
   }];
-  let arguments = (ins CudaTileArg<SymbolNameAttr, "The name of the module.", "13.1">:$sym_name);
+  let arguments = (ins CudaTileArg<SymbolNameAttr, "The name of the module.", "13.1">:$sym_name,
+                       CudaTileArg<OptionalAttr<StrAttr>, "Optional producer identifier.", "13.3">:$producer);
   let regions = (region MaxSizedRegion<1>:$body);
   let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
   let hasVerifier = 1;
@@ -3060,7 +3399,7 @@ def CudaTile_ModuleOp : CudaTileCoreOpDef<"module", "13.1", [
   let skipDefaultBuilders = 1;
 
   let builders = [
-    OpBuilder<(ins "StringRef":$name)>
+    OpBuilder<(ins "StringRef":$name, CArg<"StringRef", "\"\"">:$producer)>
   ];
 
   let extraClassDeclaration = CudaTile_DefaultDialect.classDecl;
@@ -3070,7 +3409,7 @@ def CudaTile_ModuleOp : CudaTileCoreOpDef<"module", "13.1", [
 // MulFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MulFOp : CudaTileFArithOpDef<"mulf", "13.1", [
+def CudaTile_MulFOp : CudaTileFloatingPointOpDef<"mulf", "13.1", [
     Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point multiplication";
   let description = !strconcat([{
@@ -3119,7 +3458,7 @@ def CudaTile_MulFOp : CudaTileFArithOpDef<"mulf", "13.1", [
 //===----------------------------------------------------------------------===//
 
 // Supported types for MulIOp.
-def CudaTile_MulIOp : CudaTileIArithOpDef<"muli", "13.1",
+def CudaTile_MulIOp : CudaTileIntegerOpDef<"muli", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer multiplication";
   let description = !strconcat([{
@@ -3143,7 +3482,7 @@ def CudaTile_MulIOp : CudaTileIArithOpDef<"muli", "13.1",
 // MulhiIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_MulhiIOp : CudaTileIArithOpDef<"mulhii", "13.1",
+def CudaTile_MulhiIOp : CudaTileIntegerOpDef<"mulhii", "13.1",
     [Pure, AllTypesMatch<["x", "y", "result"]>]> {
   let summary = "Element-wise high bits of integer multiplication";
   let description = !strconcat([{
@@ -3189,7 +3528,7 @@ def CudaTile_MulhiIOp : CudaTileIArithOpDef<"mulhii", "13.1",
 // NegIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_NegIOp : CudaTileIArithOpDef<"negi", "13.1", [
+def CudaTile_NegIOp : CudaTileIntegerOpDef<"negi", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise integer negation";
@@ -3225,7 +3564,7 @@ def CudaTile_NegIOp : CudaTileIArithOpDef<"negi", "13.1", [
 // NegFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_NegFOp : CudaTileFArithOpDef<"negf", "13.1", [
+def CudaTile_NegFOp : CudaTileFloatingPointOpDef<"negf", "13.1", [
     Pure, AllTypesMatch<["source", "result"]>
   ]> {
   let summary = "Element-wise floating-point negation";
@@ -3272,7 +3611,7 @@ def CudaTile_MakeTokenOp
 // OffsetOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_OffsetOp : CudaTileMiscArithOpDef<"offset", "13.1", [
+def CudaTile_OffsetOp : CudaTileCoreOpDef<"offset", "13.1", [
     Pure, Elementwise, SameOperandsAndResultShape,
     AllTypesMatch<["result", "ptr"]>]> {
   let summary = "Offsets a tile of pointers";
@@ -3306,10 +3645,57 @@ def CudaTile_OffsetOp : CudaTileMiscArithOpDef<"offset", "13.1", [
 }
 
 //===----------------------------------------------------------------------===//
+// PackOp
+//===----------------------------------------------------------------------===//
+
+// NumberTileType + Int4
+def PackOp_UnpackedType : CudaTile_TileOf<
+  !listconcat(CudaTile_NumberTileType.allowedElementTypes, [CudaTile_Int4])>;
+
+def CudaTile_PackOp : CudaTileCoreOpDef<"pack", "13.3", [
+    Pure, AllRanksMatch<["source", "result"]>]> {
+  let summary = "Pack a tile into a byte array";
+  let description = [{
+    The :code:`pack` operation takes a rank-1 numeric tile and produces a rank-1 :code:`tile<i8>`.
+
+    Similar to :code:`bitcast`, underlying bit-values are not changed. However, :code:`pack` does not
+    operate elementwise, instead reinterpreting the entire tile as a byte array.
+
+    Input and output tiles must be rank-1 to eliminate packing ambiguity. The size of the output
+    tile must match the number of bytes in the input tile. The input tile cannot be an 8-bit type
+    (bitcast should be used instead).
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @module {
+    #   entry @example() {
+          %arg0 = constant <f16: 0.0> : tile<64xf16>
+          %0 = pack %arg0 : tile<64xf16> -> tile<128xi8>
+    #   }
+    # }
+  }], [{
+    # cuda_tile.module @module {
+    #   entry @example() {
+          %arg0 = constant <f4E2M1FN: 0.0> : tile<64xf4E2M1FN>
+          %0 = pack %arg0 : tile<64xf4E2M1FN> -> tile<32xi8>
+    #   }
+    # }
+  }]];
+
+  let arguments = (ins CudaTileArg<PackOp_UnpackedType, "The input tile.", "13.3">:$source);
+  let results = (outs CudaTileArg<CudaTile_TileOf<[CudaTile_Int8]>, "The packed tile.", "13.3">:$result);
+  let assemblyFormat = [{
+    $source attr-dict `:` custom<CudaTileType>(type($source)) `->` custom<CudaTileType>(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
+
+//===----------------------------------------------------------------------===//
 // PermuteOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_PermuteOp : CudaTileTileOpDef<"permute", "13.1", [
+def CudaTile_PermuteOp : CudaTileCoreOpDef<"permute", "13.1", [
     Pure, AllElementTypeMatch<"all of {source, result} have the same element type", ["source", "result"]>,
     AllRanksMatch<["source", "result"]>]> {
   let summary = "Permute tile dimensions";
@@ -3349,7 +3735,7 @@ def CudaTile_PermuteOp : CudaTileTileOpDef<"permute", "13.1", [
 // PowOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_PowOp : CudaTileFArithOpDef<"pow", "13.1",
+def CudaTile_PowOp : CudaTileFloatingPointOpDef<"pow", "13.1",
     [Pure,
      AllTypesMatch<["result", "source", "exponent"]>,
      AllRanksMatch<["source", "exponent", "result"]>]> {
@@ -3495,7 +3881,7 @@ def CudaTile_PtrToPtrOp : CudaTileConversionOpDef<"ptr_to_ptr", "13.1", [
 // ReduceOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ReduceOp : CudaTileTileOpDef<"reduce", "13.1", [
+def CudaTile_ReduceOp : CudaTileCoreOpDef<"reduce", "13.1", [
     InferTypeOpAdaptor, OpAsmOpInterface, RecursiveMemoryEffects,
     SameOperandsShape, SingleBlockImplicitTerminator<"YieldOp">,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames", "getAsmBlockArgumentNames"]>
@@ -3510,6 +3896,10 @@ def CudaTile_ReduceOp : CudaTileTileOpDef<"reduce", "13.1", [
     The reduction function must be an associative operation defined within the :code:`reduce`
     operation's region. A single reduction operation can reduce over any number of input tiles in
     parallel, producing a reduced output tile for each.
+
+    .. note::
+
+      Only pure operations are allowed in the body of :code:`reduce`.
 
     All input tiles must have the same shape. The output tiles will have a matching shape in every
     dimension except the one being reduced, which is removed.
@@ -3583,7 +3973,7 @@ def CudaTile_ReduceOp : CudaTileTileOpDef<"reduce", "13.1", [
 // RemIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_RemIOp : CudaTileIArithOpDef<"remi", "13.1", [
+def CudaTile_RemIOp : CudaTileIntegerOpDef<"remi", "13.1", [
     Pure, AllTypesMatch<["result", "lhs", "rhs"]>,
     AllShapesMatch<["result", "lhs", "rhs"]>]> {
   let summary = "Element-wise integer remainder";
@@ -3627,7 +4017,7 @@ def CudaTile_RemIOp : CudaTileIArithOpDef<"remi", "13.1", [
 // ReshapeOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ReshapeOp : CudaTileTileOpDef<"reshape", "13.1", [
+def CudaTile_ReshapeOp : CudaTileCoreOpDef<"reshape", "13.1", [
     Pure, SameOperandsAndResultElementType,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Reshape tile dimensions";
@@ -3728,7 +4118,7 @@ def CudaTile_ReturnOp : CudaTileControlFlowOpDef<"return", "13.1", [
   let arguments = (ins CudaTileArg<Variadic<AnyType>, "The values to return.", "13.1">:$operands);
 
   let builders = [OpBuilder<(ins), [{
-    build($_builder, $_state, ValueRange());
+    build($_builder, $_state, ValueRange{});
   }]>];
 
   let assemblyFormat = [{
@@ -3742,7 +4132,7 @@ def CudaTile_ReturnOp : CudaTileControlFlowOpDef<"return", "13.1", [
 // ScanOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ScanOp : CudaTileTileOpDef<"scan", "13.1", [
+def CudaTile_ScanOp : CudaTileCoreOpDef<"scan", "13.1", [
     InferTypeOpAdaptor, OpAsmOpInterface, RecursiveMemoryEffects,
     SameOperandsShape, SingleBlockImplicitTerminator<"YieldOp">
 ]> {
@@ -3758,6 +4148,10 @@ def CudaTile_ScanOp : CudaTileTileOpDef<"scan", "13.1", [
     producing new :code:`results` tile values. The exact evaluation order within each
     prefix is implementation-defined but the result remains deterministic across different
     runs of the same kernel on the same device.
+
+    .. note::
+
+      Only pure operations are allowed in the body of :code:`scan`.
 
     .. math::
       \text{scan}(X, \text{dim}, \text{identity}, f)_{i_1,\ldots,i_d}[j] \;=\;
@@ -3838,7 +4232,7 @@ def CudaTile_ScanOp : CudaTileTileOpDef<"scan", "13.1", [
 // SelectOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SelectOp : CudaTileMiscArithOpDef<"select", "13.1",
+def CudaTile_SelectOp : CudaTileCoreOpDef<"select", "13.1",
     [Pure,
     AllTypesMatch<["val_if_true", "val_if_false", "result"]>,
     AllShapesMatch<["cond", "val_if_true", "val_if_false", "result"]>]> {
@@ -3880,7 +4274,7 @@ def CudaTile_SelectOp : CudaTileMiscArithOpDef<"select", "13.1",
 //===----------------------------------------------------------------------===//
 
 // Supported types for ShLIOp and ShRIOp.
-def CudaTile_ShLIOp : CudaTileIArithOpDef<"shli", "13.1",
+def CudaTile_ShLIOp : CudaTileIntegerOpDef<"shli", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise shift-left";
   let description = !strconcat([{
@@ -3906,7 +4300,7 @@ def CudaTile_ShLIOp : CudaTileIArithOpDef<"shli", "13.1",
 // ShRIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ShRIOp : CudaTileIArithOpDef<"shri", "13.1",
+def CudaTile_ShRIOp : CudaTileIntegerOpDef<"shri", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise shift-right";
   let description = !strconcat([{
@@ -3944,7 +4338,7 @@ def CudaTile_ShRIOp : CudaTileIArithOpDef<"shri", "13.1",
 // SinOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SinOp : CudaTileMathOpDef<"sin", "13.1",
+def CudaTile_SinOp : CudaTileFloatingPointOpDef<"sin", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise sine";
   let description = !strconcat([{
@@ -3977,7 +4371,7 @@ def CudaTile_SinOp : CudaTileMathOpDef<"sin", "13.1",
 // SinHOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SinHOp : CudaTileMathOpDef<"sinh", "13.1",
+def CudaTile_SinHOp : CudaTileFloatingPointOpDef<"sinh", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise hyperbolic sine";
   let description = !strconcat([{
@@ -4138,6 +4532,40 @@ def CudaTile_StoreViewTkoOp : CudaTileViewOpDef<"store_view_tko", "13.1",
             : tile<64x64xf32>, partition_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>>, tile<i32> -> token
         # }
       # }
+  }],
+  [{
+    # cuda_tile.module @module {
+    #   entry @example_scatter(%ptr: tile<ptr<f32>>) {
+          // Create a tensor view
+          %tensor_view = make_tensor_view %ptr, shape=[8192, 128], strides=[128, 1]
+            : tensor_view<8192x128xf32, strides=[128,1]>
+
+          // Create a gather/scatter view with tile size (64x64) along dimension 0
+          %gsview = make_gather_scatter_view %tensor_view :
+            gather_scatter_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>, sparse_dim=0>
+
+          // Tile to store
+          %tile = constant <f32: 1.0> : tile<64x64xf32>
+
+          // The 1D tensor index MUST be at position `sparse_dim` (here sparse_dim=0)
+          // Index at sparse_dim=0: 1D tensor containing scatter indices
+          %scatter_indices = constant <i32: [5, 15, 25, 35, 45, 55, 65, 75]> : tile<8xi32>
+          // Index at sparse_dim=1: scalar for the other dimension
+          %col_idx = constant <i32: 1> : tile<i32>
+
+          // Store tiles using scatter semantics
+          // Index order: [%scatter_indices (at sparse_dim=0), %col_idx (at sparse_dim=1)]
+          %res_token0 = store_view_tko weak %tile, %gsview[%scatter_indices, %col_idx]
+            : tile<64x64xf32>, gather_scatter_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>, sparse_dim=0>, tile<8xi32>, tile<i32>
+            -> token
+
+          // Store with input token
+          %token_in = make_token : token
+          %res_token1 = store_view_tko weak %tile, %gsview[%scatter_indices, %col_idx] token = %token_in
+            : tile<64x64xf32>, gather_scatter_view<tile=(64x64), tensor_view<8192x128xf32, strides=[128,1]>, sparse_dim=0>, tile<8xi32>, tile<i32>
+            -> token
+        # }
+      # }
   }]];
 
   let arguments = (ins
@@ -4149,23 +4577,13 @@ def CudaTile_StoreViewTkoOp : CudaTileViewOpDef<"store_view_tko", "13.1",
     CudaTileArg<OptionalAttr<CudaTile_MemoryScopeAttr>, "The memory scope for the store operation.", "13.1">:$memory_scope,
     CudaTileArg<CudaTile_TileType, "The tile to store.", "13.1">:$tile,
     CudaTileArg<CudaTile_TileView, "The view to store the tile to.", "13.1">:$view,
-    CudaTileArg<Variadic<CudaTile_ScalarTileOf<CudaTile_AnyInt>>, "The indices of the desired target tile within the view.", "13.1">:$index,
+    CudaTileArg<Variadic<CudaTile_IntTileType>, "The indices of the desired target tile within the view. For GatherScatterView, the first index can be a 1D tensor.", "13.1">:$index,
     CudaTileArg<Optional<CudaTile_TokenType>, token_desc, "13.1">:$token,
     CudaTileArg<OptionalAttr<CudaTile_OptimizationHintsAttr>, "Optimization hints for operation", "13.1">:$optimization_hints);
 
   let results = (outs CudaTileArg<CudaTile_TokenType, "The result token for synchronization.", "13.1">:$result_token);
 
-  let assemblyFormat = [{
-    custom<MemoryAttributes>($memory_ordering_semantics, $memory_scope)
-    $tile `,`
-    $view `[` $index `]`
-    (`token` `=` $token^)?
-    (`optimization_hints` `=` $optimization_hints^)?
-    attr-dict-with-keyword
-    `:` custom<CudaTileType>(type($tile)) `,` custom<CudaTileType>(type($view))
-        `,` custom<CudaTileTypeSplat>(type($index), ref($index))
-    `->` custom<CudaTileType>(type($result_token))
-  }];
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }
 
@@ -4173,7 +4591,7 @@ def CudaTile_StoreViewTkoOp : CudaTileViewOpDef<"store_view_tko", "13.1",
 // SubFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SubFOp : CudaTileFArithOpDef<"subf", "13.1",
+def CudaTile_SubFOp : CudaTileFloatingPointOpDef<"subf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point subtraction";
   let description = !strconcat([{
@@ -4215,7 +4633,7 @@ def CudaTile_SubFOp : CudaTileFArithOpDef<"subf", "13.1",
 // SubIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SubIOp : CudaTileIArithOpDef<"subi", "13.1",
+def CudaTile_SubIOp : CudaTileIntegerOpDef<"subi", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise integer subtraction";
   let description = !strconcat([{
@@ -4239,7 +4657,7 @@ def CudaTile_SubIOp : CudaTileIArithOpDef<"subi", "13.1",
 // TanOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_TanOp : CudaTileMathOpDef<"tan", "13.1",
+def CudaTile_TanOp : CudaTileFloatingPointOpDef<"tan", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise tangent";
   let description = !strconcat([{
@@ -4262,7 +4680,7 @@ def CudaTile_TanOp : CudaTileMathOpDef<"tan", "13.1",
 // TanHOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_TanHOp : CudaTileMathOpDef<"tanh", "13.1",
+def CudaTile_TanHOp : CudaTileFloatingPointOpDef<"tanh", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise hyperbolic tangent";
   let description = !strconcat([{
@@ -4315,6 +4733,52 @@ def CudaTile_TanHOp : CudaTileMathOpDef<"tanh", "13.1",
 }
 
 //===----------------------------------------------------------------------===//
+// UnpackOp
+//===----------------------------------------------------------------------===//
+
+// NumberTileType + Int4
+def UnpackOp_UnpackedType : CudaTile_TileOf<
+  !listconcat(CudaTile_NumberTileType.allowedElementTypes, [CudaTile_Int4])>;
+
+def CudaTile_UnpackOp : CudaTileCoreOpDef<"unpack", "13.3", [
+    Pure, AllRanksMatch<["source", "result"]>]> {
+  let summary = "Unpack a byte array into a tile";
+  let description = [{
+    The :code:`unpack` operation takes a rank-1 :code:`tile<i8>` and produces a rank-1 numeric tile.
+
+    Similar to :code:`bitcast`, underlying bit-values are not changed. However, :code:`unpack` does not
+    operate elementwise, instead reinterpreting the entire tile as a numeric tile of different element type.
+
+    Input and output tiles must be rank-1 to eliminate unpacking ambiguity. The size of the input
+    tile must match the number of bytes in the output tile. The output tile cannot be an 8-bit type
+    (bitcast should be used instead).
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @module {
+    #   entry @example() {
+          %arg0 = constant <i8: 0> : tile<64xi8>
+          %0 = unpack %arg0 : tile<64xi8> -> tile<32xf16>
+    #   }
+    # }
+  }], [{
+    # cuda_tile.module @module {
+    #   entry @example() {
+          %arg0 = constant <i8: 0> : tile<64xi8>
+          %0 = unpack %arg0 : tile<64xi8> -> tile<128xF4E2M1FN>
+    #   }
+    # }
+  }]];
+
+  let arguments = (ins CudaTileArg<CudaTile_TileOf<[CudaTile_Int8]>, "The input i8 tile.", "13.3">:$source);
+  let results = (outs CudaTileArg<UnpackOp_UnpackedType, "The output unpacked tile.", "13.3">:$result);
+  let assemblyFormat = [{
+    $source attr-dict `:` custom<CudaTileType>(type($source)) `->` custom<CudaTileType>(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // MakePartitionViewOp
 //===----------------------------------------------------------------------===//
 
@@ -4334,7 +4798,7 @@ def CudaTile_MakePartitionViewOp
     The resulting partition view can be loaded from using :ref:`op-cuda_tile.load_view_tko` and
     stored to using :ref:`op-cuda_tile.store_view_tko`.
 
-    The view memory options act on the computed index space of the partition view see
+    The view memory options act on the computed index space of the partition view, see
     :ref:`type-tensor_view` and :ref:`type-partition_view` for detailed semantics.
   }];
 
@@ -4361,7 +4825,7 @@ def CudaTile_MakePartitionViewOp
             : tile<i32> -> tensor_view<?x8192x64xf32, strides=[?,64,1]>
 
           // Creates a partition with 32-bit-indexed tiles of size (1024x1x32) over
-          // the provided tensor_view, with masking. The provided tensor_view has a
+          // the provided tensor_view. The provided tensor_view has a
           // dynamically-sized dimension.
           make_partition_view %tensor_view1 :
             partition_view<tile=(1024x1x32), tensor_view<?x8192x64xf32, strides=[?,64,1]>>
@@ -4377,10 +4841,129 @@ def CudaTile_MakePartitionViewOp
 }
 
 //===----------------------------------------------------------------------===//
+// MakeStridedViewOp
+//===----------------------------------------------------------------------===//
+
+def CudaTile_MakeStridedViewOp
+      : CudaTileViewOpDef<"make_strided_view", "13.3",
+    [Pure,
+     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+  let summary = "Create a strided view from a tensor view";
+  let description = [{
+    The :code:`make_strided_view` operation creates a :tileirty:`strided_view` from a
+    :tileirty:`tensor_view`. For more details about strided views see :ref:`type-strided_view`.
+
+    The operation uses the type constraints of the input tensor view and the annotated return type
+    to perform the tiling. The tensor view's type contains its physical layout in the form
+    of shapes and strides and the strided view contains the logical size of a single tile,
+    along with the traversal striding factors.
+
+    The resulting strided view can be loaded from using :ref:`op-cuda_tile.load_view_tko` and
+    stored to using :ref:`op-cuda_tile.store_view_tko`.
+
+    The view memory options act on the computed index space of the strided view, see
+    :ref:`type-tensor_view` and :ref:`type-strided_view` for detailed semantics.
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @module {
+    #   entry @example(%ptr: tile<ptr<f32>>) {
+
+          %tensor_view0 = make_tensor_view %ptr, shape=[8192, 8192, 64], strides=[524288,64,1]
+            : tensor_view<8192x8192x64xf32, strides=[524288,64,1]>
+
+          // Creates a strided view with 32-bit-indexed tiles of size (1024x1x32) and
+          // a traversal of strides [512,1,10] over the provided tensor_view.
+          make_strided_view %tensor_view0 :
+            strided_view<
+              tile=(1024x1x32),
+              traversal_strides=[512,1,10],
+              tensor_view<8192x8192x64xf32, strides=[524288,64,1]>
+            >
+
+          %s0 = constant <i32: 8192> : tile<i32>
+          %str0 = constant <i32: 524288> : tile<i32>
+
+          %tensor_view1 = make_tensor_view %ptr, shape=[%s0, 8192, 64], strides=[%str0, 64, 1]
+            : tile<i32> -> tensor_view<?x8192x64xf32, strides=[?,64,1]>
+
+          // Creates a strided view with 32-bit-indexed tiles of size (1024x1x32) and
+          // a traversal of strides [512,1,10] over the provided tensor_view. The
+          // provided tensor_view has a dynamically-sized dimension.
+          make_strided_view %tensor_view1 :
+            strided_view<
+              tile=(1024x1x32),
+              traversal_strides=[512,1,10],
+              tensor_view<?x8192x64xf32, strides=[?,64,1]>
+            >
+    #   }
+    # }
+  }]];
+
+  let arguments = (ins CudaTileArg<CudaTile_TensorViewType, "The source tensor view to create a strided view from.", "13.3">:$tensor_view);
+  let results = (outs CudaTileArg<CudaTile_StridedViewType, "The created strided view.", "13.3">:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// MakeGatherScatterViewOp
+//===----------------------------------------------------------------------===//
+
+def CudaTile_MakeGatherScatterViewOp
+      : CudaTileViewOpDef<"make_gather_scatter_view", "13.3",
+    [Pure,
+     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+  let summary = "Create a gather/scatter view from a tensor view";
+  let description = [{
+    The :code:`make_gather_scatter_view` operation creates a :tileirty:`gather_scatter_view` from a
+    :tileirty:`tensor_view`. For more details about gather/scatter views see :ref:`type-gather_scatter_view`.
+
+    The operation uses the type constraints of the input tensor view and the annotated return type
+    to perform the gathering/scattering. The tensor view's type contains its physical layout in the form
+    of shapes and strides and the gather/scatter view contains the logical size of a single tile and
+    the dimension along which to gather/scatter.
+
+    The resulting gather/scatter view can be loaded from using :ref:`op-cuda_tile.load_view_tko` and
+    stored to using :ref:`op-cuda_tile.store_view_tko`.
+
+    The view memory options act on the computed index space of the gather/scatter view see
+    :ref:`type-tensor_view` and :ref:`type-gather_scatter_view` for detailed semantics.
+  }];
+
+  let mlirExamples = [[{
+    # cuda_tile.module @module {
+    #   entry @example(%ptr: tile<ptr<f32>>) {
+
+          %tensor_view0 = make_tensor_view %ptr, shape=[8192, 8192], strides=[8192, 1]
+            : tensor_view<8192x8192xf32, strides=[8192, 1]>
+
+          // Creates a gather/scatter view with tiles of size (128x128) over
+          // the provided tensor_view, gathering/scattering along dimension 0.
+          make_gather_scatter_view %tensor_view0 :
+            gather_scatter_view<
+              tile=(128x128),
+              tensor_view<8192x8192xf32, strides=[8192, 1]>,
+              sparse_dim=0
+            >
+
+    #   }
+    # }
+  }]];
+
+  let arguments = (ins CudaTileArg<CudaTile_TensorViewType, "The source tensor view to create a gather/scatter view from.", "13.1">:$tensor_view);
+  let results = (outs CudaTileArg<CudaTile_GatherScatterViewType, "The created gather/scatter view.", "13.3">:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // XOrIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_XOrIOp : CudaTileIArithOpDef<"xori", "13.1",
+def CudaTile_XOrIOp : CudaTileBitwiseOpDef<"xori", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise bitwise XOR";
   let description = !strconcat([{
@@ -4468,7 +5051,7 @@ def CudaTile_YieldOp : CudaTileControlFlowOpDef<"yield", "13.1", [
 // OrIOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_OrIOp : CudaTileIArithOpDef<"ori", "13.1",
+def CudaTile_OrIOp : CudaTileBitwiseOpDef<"ori", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise bitwise OR";
   let description = !strconcat([{
@@ -4491,7 +5074,7 @@ def CudaTile_OrIOp : CudaTileIArithOpDef<"ori", "13.1",
 // RemFOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_RemFOp : CudaTileFArithOpDef<"remf", "13.1",
+def CudaTile_RemFOp : CudaTileFloatingPointOpDef<"remf", "13.1",
     [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Element-wise floating-point remainder";
   let description = !strconcat([{
@@ -4524,7 +5107,7 @@ def CudaTile_RemFOp : CudaTileFArithOpDef<"remf", "13.1",
 // RsqrtOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_RsqrtOp : CudaTileMathOpDef<"rsqrt", "13.1",
+def CudaTile_RsqrtOp : CudaTileFloatingPointOpDef<"rsqrt", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise reciprocal square root";
   let description = !strconcat([{
@@ -4575,7 +5158,7 @@ def CudaTile_RsqrtOp : CudaTileMathOpDef<"rsqrt", "13.1",
 // SqrtOp
 //===----------------------------------------------------------------------===//
 
-def CudaTile_SqrtOp : CudaTileMathOpDef<"sqrt", "13.1",
+def CudaTile_SqrtOp : CudaTileFloatingPointOpDef<"sqrt", "13.1",
     [Pure, AllTypesMatch<["source", "result"]>]> {
   let summary = "Element-wise square root";
   let description = [{

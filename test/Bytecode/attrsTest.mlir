@@ -2,6 +2,14 @@
 
 
 cuda_tile.module @kernels {
+  // Test SymbolVisibilityAttribute for global (public omitted, private explicit)
+  cuda_tile.global @g4 <i32: [42]> : !cuda_tile.tile<1xi32>
+  cuda_tile.global private @g5 <i32: [10]> : !cuda_tile.tile<1xi32>
+
+  // Test constant attribute for global
+  cuda_tile.global constant @g6 <f32: [3.14]> : !cuda_tile.tile<1xf32>
+  cuda_tile.global private constant @g7 <i32: [100]> : !cuda_tile.tile<1xi32>
+
   // Test addf with flush_to_zero
   cuda_tile.entry @addf_op_ftz(%a: !cuda_tile.tile<f32>, %b: !cuda_tile.tile<f32>) {
     %0 = cuda_tile.addf %a, %b rounding<nearest_even> flush_to_zero : tile<f32>

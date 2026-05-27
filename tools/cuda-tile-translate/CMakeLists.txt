@@ -27,4 +27,5 @@ target_link_libraries(cuda-tile-translate PRIVATE
   ${LIBS}
   LLVMSupport
 )
-llvm_update_compile_flags(cuda-tile-translate) 
+llvm_update_compile_flags(cuda-tile-translate)
+

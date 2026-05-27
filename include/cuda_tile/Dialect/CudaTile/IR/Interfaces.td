@@ -62,6 +62,25 @@ def CudaTile_TileView : TypeInterface<"TileView"> {
       /*methodName=*/"getViewTileType",
       /*args=*/(ins)
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Verifies that the given index types are valid for this view type.
+        This allows different view types to enforce their own constraints
+        on index types (e.g., GatherScatterView requires specific index
+        structure while PartitionView requires uniform index types).
+        
+        Args:
+          emitError: A function to emit diagnostics for verification failures
+          indexTypes: The types of index operands to verify
+        
+        Returns:
+          success() if indices are valid, failure() otherwise
+      }],
+      /*retTy=*/"::mlir::LogicalResult",
+      /*methodName=*/"verifyIndices",
+      /*args=*/(ins "::llvm::function_ref<::mlir::InFlightDiagnostic()>":$emitError,
+                    "::mlir::TypeRange":$indexTypes)
+    >,
   ];
 }
 

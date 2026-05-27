@@ -235,6 +235,88 @@ MlirType mlirCudaTilePartitionViewTypeGetChecked(
 }
 
 //===----------------------------------------------------------------------===//
+// StridedViewType
+//===----------------------------------------------------------------------===//
+
+bool mlirCudaTileTypeIsAStridedViewType(MlirType type) {
+  return isa<StridedViewType>(unwrap(type));
+}
+
+MlirTypeID mlirCudaTileStridedViewTypeGetTypeID(void) {
+  return wrap(StridedViewType::getTypeID());
+}
+
+MlirType mlirCudaTileStridedViewTypeGet(
+    MlirContext ctx, MlirAttribute tileShapeAttr,
+    MlirAttribute traversalStridesAttr, MlirType tensorViewType,
+    intptr_t dimMapRank, const int32_t *dimMap, MlirAttribute paddingValue) {
+  ArrayRef<int32_t> dimMapRef(dimMap, dimMapRank);
+  auto tileShapeDenseI32 = cast<DenseI32ArrayAttr>(unwrap(tileShapeAttr));
+  auto traversalStridesDenseI32 =
+      cast<DenseI32ArrayAttr>(unwrap(traversalStridesAttr));
+  auto tensorView = cast<TensorViewType>(unwrap(tensorViewType));
+  PaddingValueAttr paddingValueAttr = nullptr;
+  if (!mlirAttributeIsNull(paddingValue))
+    paddingValueAttr = cast<PaddingValueAttr>(unwrap(paddingValue));
+  return wrap(StridedViewType::get(unwrap(ctx), tileShapeDenseI32,
+                                   traversalStridesDenseI32, tensorView,
+                                   dimMapRef, paddingValueAttr));
+}
+
+MlirAttribute mlirCudaTileStridedViewTypeGetTileShape(MlirType type) {
+  return wrap(cast<StridedViewType>(unwrap(type)).getTileShape());
+}
+
+MlirAttribute mlirCudaTileStridedViewTypeGetTraversalStrides(MlirType type) {
+  return wrap(cast<StridedViewType>(unwrap(type)).getTraversalStrides());
+}
+
+MlirType mlirCudaTileStridedViewTypeGetTensorView(MlirType type) {
+  return wrap(cast<StridedViewType>(unwrap(type)).getTensorView());
+}
+
+intptr_t mlirCudaTileStridedViewTypeGetDimMapRank(MlirType type) {
+  return cast<StridedViewType>(unwrap(type)).getDimMap().size();
+}
+
+int32_t mlirCudaTileStridedViewTypeGetDimMapElement(MlirType type,
+                                                    intptr_t pos) {
+  return cast<StridedViewType>(unwrap(type)).getDimMap()[pos];
+}
+
+MlirAttribute mlirCudaTileStridedViewTypeGetPaddingValue(MlirType type) {
+  auto paddingValue = cast<StridedViewType>(unwrap(type)).getPaddingValue();
+  if (paddingValue)
+    return wrap(paddingValue);
+  return {nullptr};
+}
+
+MlirType mlirCudaTileStridedViewTypeGetViewTileType(MlirType type) {
+  return wrap(cast<StridedViewType>(unwrap(type)).getViewTileType());
+}
+
+intptr_t mlirCudaTileStridedViewTypeGetViewIndexRank(MlirType type) {
+  return cast<StridedViewType>(unwrap(type)).getViewIndexRank();
+}
+
+MlirType mlirCudaTileStridedViewTypeGetChecked(
+    MlirContext ctx, MlirAttribute tileShapeAttr,
+    MlirAttribute traversalStridesAttr, MlirType tensorViewType,
+    intptr_t dimMapRank, const int32_t *dimMap, MlirAttribute paddingValue) {
+  ArrayRef<int32_t> dimMapRef(dimMap, dimMapRank);
+  auto tileShapeDenseI32 = cast<DenseI32ArrayAttr>(unwrap(tileShapeAttr));
+  auto traversalStridesDenseI32 =
+      cast<DenseI32ArrayAttr>(unwrap(traversalStridesAttr));
+  auto tensorView = cast<TensorViewType>(unwrap(tensorViewType));
+  PaddingValueAttr paddingValueAttr = nullptr;
+  if (!mlirAttributeIsNull(paddingValue))
+    paddingValueAttr = cast<PaddingValueAttr>(unwrap(paddingValue));
+  return wrap(getCheckedType<StridedViewType>(
+      unwrap(ctx), tileShapeDenseI32, traversalStridesDenseI32, tensorView,
+      dimMapRef, paddingValueAttr));
+}
+
+//===----------------------------------------------------------------------===//
 // RoundingModeAttr
 //===----------------------------------------------------------------------===//
 
@@ -465,6 +547,29 @@ MlirStringRef mlirCudaTileSignednessAttrGetValue(MlirAttribute attr) {
 }
 
 //===----------------------------------------------------------------------===//
+// SymbolVisibilityAttr
+//===----------------------------------------------------------------------===//
+
+bool mlirCudaTileAttributeIsASymbolVisibilityAttr(MlirAttribute attr) {
+  return isa<SymbolVisibilityAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirCudaTileSymbolVisibilityAttrGet(MlirContext ctx,
+                                                  MlirStringRef value) {
+  StringRef valueStr = unwrap(value);
+  auto visibility = symbolizeSymbolVisibility(valueStr);
+  if (!visibility.has_value())
+    return {nullptr};
+  return wrap(SymbolVisibilityAttr::get(unwrap(ctx), visibility.value()));
+}
+
+MlirStringRef mlirCudaTileSymbolVisibilityAttrGetValue(MlirAttribute attr) {
+  auto visibilityAttr = cast<SymbolVisibilityAttr>(unwrap(attr));
+  StringRef result = stringifySymbolVisibility(visibilityAttr.getValue());
+  return wrap(result);
+}
+
+//===----------------------------------------------------------------------===//
 // OptimizationHintsAttr
 //===----------------------------------------------------------------------===//
 
@@ -479,7 +584,8 @@ MlirAttribute mlirCudaTileOptimizationHintsAttrGetEmpty(MlirContext ctx) {
 }
 
 MlirAttribute mlirCudaTileOptimizationHintsAttrGetEntryOpHint(
-    MlirContext ctx, MlirStringRef arch, int32_t numCta, int32_t occupancy) {
+    MlirContext ctx, MlirStringRef arch, int32_t numCta, int32_t numWorkerWarps,
+    int32_t occupancy) {
   auto context = unwrap(ctx);
   StringRef archStr = unwrap(arch);
 
@@ -490,6 +596,12 @@ MlirAttribute mlirCudaTileOptimizationHintsAttrGetEntryOpHint(
   if (numCta != 0) {
     innerAttrs.emplace_back(StringAttr::get(context, "num_cta_in_cga"),
                             IntegerAttr::get(i32, numCta));
+  }
+
+  if (numWorkerWarps != 0) {
+    innerAttrs.emplace_back(
+        StringAttr::get(context, "num_worker_warps_per_cta"),
+        IntegerAttr::get(i32, numWorkerWarps));
   }
 
   if (occupancy != 0) {

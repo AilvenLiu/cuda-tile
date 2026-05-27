@@ -16,12 +16,10 @@
 #include "test/RoundTripTestRegistration.h"
 
 int main(int argc, char **argv) {
-  mlir::DialectRegistry registry;
-  registry.insert<mlir::cuda_tile::CudaTileDialect>();
-
   // Register command line options before parsing.
   mlir::cuda_tile::registerTileIRBytecodeVersionOption();
-
+  mlir::cuda_tile::registerTileIROptimizationHintsOptions();
+  mlir::cuda_tile::registerListVersionsOption();
   mlir::cuda_tile::registerTileIRTranslations();
   mlir::cuda_tile::registerTileIRTestTranslations();
 

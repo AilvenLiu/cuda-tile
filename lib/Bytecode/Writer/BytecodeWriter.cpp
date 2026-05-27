@@ -9,6 +9,7 @@
 //
 // Implements the BytecodeWriter for the cuda_tile dialect, enabling
 // serialization of a cuda_tile module into a custom bytecode format.
+//
 //===----------------------------------------------------------------------===//
 
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
@@ -429,18 +430,12 @@ private:
     if (typeIndexMap.count(type.getAsOpaquePointer()))
       return;
 
-    // Register dependent types based on the type kind
-    if (auto tileType = dyn_cast<cuda_tile::TileType>(type)) {
-      getTypeIndex(tileType.getElementType());
-    } else if (auto pointerType = dyn_cast<cuda_tile::PointerType>(type)) {
-      getTypeIndex(pointerType.getPointeeType());
-    } else if (auto tensorViewType =
-                   dyn_cast<cuda_tile::TensorViewType>(type)) {
-      getTypeIndex(tensorViewType.getElementType());
-    } else if (auto tileViewType =
-                   dyn_cast<cuda_tile::PartitionViewType>(type)) {
-      getTypeIndex(tileViewType.getTensorView());
-    } else if (auto funcType = dyn_cast<FunctionType>(type)) {
+      // Auto-generated dependent type registration for CudaTile types.
+#define GEN_DEPENDENT_TYPE_REGISTRATION
+#include "TypeBytecode.inc"
+
+    // FunctionType is not a CudaTile type, handle it manually.
+    if (auto funcType = dyn_cast<FunctionType>(type)) {
       for (Type input : funcType.getInputs())
         getTypeIndex(input);
       for (Type result : funcType.getResults())
@@ -946,6 +941,10 @@ private:
 #define GEN_OPCODE_MAP
 #include "StaticOpcodes.inc"
 
+/// Runtime version check for enum values.
+#define GEN_ENUM_VALUE_VERSION_CHECK
+#include "AttrBytecode.inc"
+
 namespace {
 struct FunctionTableWriter {
   FunctionTableWriter(TypeManager &tm, ConstantManager &cm, StringManager &sm,
@@ -1019,6 +1018,24 @@ struct FunctionTableWriter {
     return writeResultTypes(op->getResultTypes(), writer, typeMgr);
   }
 
+/// Helper macro for writing versioned CudaTile attribute tags.
+/// Performs version check and writes the tag if isSelfContained is true.
+/// Returns failure with an error message if the attribute is not available
+/// in the target bytecode version.
+/// Requires: op, isSelfContained, config, writer in scope.
+#define WRITE_VERSIONED_ATTR_TAG(TagName)                                      \
+  do {                                                                         \
+    if (isSelfContained) {                                                     \
+      if (!isAttrTagAvailableInVersion(                                        \
+              static_cast<uint8_t>(Bytecode::AttributeTag::TagName),           \
+              config.bytecodeVersion))                                         \
+        return op->emitError("attribute '" #TagName                            \
+                             "' is not available in bytecode version ")        \
+               << config.bytecodeVersion.toString();                           \
+      writer.writeVarInt(Bytecode::AttributeTag::TagName);                     \
+    }                                                                          \
+  } while (0)
+
   // Writes the index or inline representation of an attribute.
   // This function determines whether to serialize inline or use an index based
   // on the attribute type.
@@ -1089,27 +1106,26 @@ struct FunctionTableWriter {
           return op->emitError("unsupported DenseElementsAttr element type "
                                "during serialization");
         })
-        .Case<cuda_tile::DivByAttr>([&](cuda_tile::DivByAttr attr) {
-          if (isSelfContained)
-            writer.writeVarInt(Bytecode::AttributeTag::DivBy);
-          writer.writeVarInt(attr.getDivisor());
-          uint8_t flags = 0;
-          if (attr.getEvery().has_value())
-            flags |= 0x01;
-          if (attr.getAlong().has_value())
-            flags |= 0x02;
-          writer.writeByte(flags);
+        .Case<cuda_tile::DivByAttr>(
+            [&](cuda_tile::DivByAttr attr) -> LogicalResult {
+              WRITE_VERSIONED_ATTR_TAG(DivBy);
+              writer.writeVarInt(attr.getDivisor());
+              uint8_t flags = 0;
+              if (attr.getEvery().has_value())
+                flags |= 0x01;
+              if (attr.getAlong().has_value())
+                flags |= 0x02;
+              writer.writeByte(flags);
 
-          if (attr.getEvery().has_value())
-            writer.writeSignedVarInt(attr.getEvery().value());
-          if (attr.getAlong().has_value())
-            writer.writeSignedVarInt(attr.getAlong().value());
-          return success();
-        })
+              if (attr.getEvery().has_value())
+                writer.writeSignedVarInt(attr.getEvery().value());
+              if (attr.getAlong().has_value())
+                writer.writeSignedVarInt(attr.getAlong().value());
+              return success();
+            })
         .Case<cuda_tile::SameElementsAttr>(
-            [&](cuda_tile::SameElementsAttr attr) {
-              if (isSelfContained)
-                writer.writeVarInt(Bytecode::AttributeTag::SameElements);
+            [&](cuda_tile::SameElementsAttr attr) -> LogicalResult {
+              WRITE_VERSIONED_ATTR_TAG(SameElements);
               DenseI64ArrayAttr values = attr.getValues();
               writer.writeLEVarSize(values.asArrayRef());
               return success();
@@ -1144,16 +1160,15 @@ struct FunctionTableWriter {
         .Case<cuda_tile::OptimizationHintsAttr>(
             [&](cuda_tile::OptimizationHintsAttr optHintsAttr)
                 -> LogicalResult {
-              if (isSelfContained)
-                writer.writeVarInt(Bytecode::AttributeTag::OptimizationHints);
+              WRITE_VERSIONED_ATTR_TAG(OptimizationHints);
               // OptimizationHintsAttr contains a DictionaryAttr.
               return writeSingleAttribute(op, attrName, optHintsAttr.getValue(),
                                           writer, typeMgr, constMgr, strMgr,
                                           /*isSelfContained=*/false);
             })
-        .Case<cuda_tile::BoundedAttr>([&](cuda_tile::BoundedAttr attr) {
-          if (isSelfContained)
-            writer.writeVarInt(Bytecode::AttributeTag::Bounded);
+        .Case<cuda_tile::BoundedAttr>([&](cuda_tile::BoundedAttr attr)
+                                          -> LogicalResult {
+          WRITE_VERSIONED_ATTR_TAG(Bounded);
           uint8_t flags = 0;
           if (attr.getLb().has_value())
             flags |= 0x01;
@@ -1168,6 +1183,14 @@ struct FunctionTableWriter {
                 static_cast<uint64_t>(attr.getUb().value()));
           return success();
         })
+#ifdef TILE_IR_INCLUDE_TESTS
+        .Case<cuda_tile::BytecodeTestValueAttr>(
+            [&](cuda_tile::BytecodeTestValueAttr attr) -> LogicalResult {
+              WRITE_VERSIONED_ATTR_TAG(BytecodeTestValue);
+              writer.writeSignedVarInt(attr.getValue());
+              return success();
+            })
+#endif // TILE_IR_INCLUDE_TESTS
         .Default([&](Attribute) -> LogicalResult {
           // Default case: Error for unsupported types in this context
           // TODO: Need to handle other potential attribute types if they occur
@@ -1208,18 +1231,14 @@ struct FunctionTableWriter {
     return success();
   }
 
-  /// Helper type trait to check if T is one of the specified CUDA tile enums.
-  template <typename T>
-  struct is_cuda_tile_enum
-      : std::disjunction<std::is_same<T, cuda_tile::RoundingMode>,
-                         std::is_same<T, cuda_tile::ComparisonPredicate>,
-                         std::is_same<T, cuda_tile::ComparisonOrdering>,
-                         std::is_same<T, cuda_tile::AtomicRMWMode>,
-                         std::is_same<T, cuda_tile::MemoryOrderingSemantics>,
-                         std::is_same<T, cuda_tile::MemoryScope>,
-                         std::is_same<T, cuda_tile::IntegerOverflow>,
-                         std::is_same<T, cuda_tile::PaddingValue>,
-                         std::is_same<T, cuda_tile::Signedness>> {};
+  /// Helper type trait to check if T is one of the CUDA tile enums.
+  /// Auto-generated from CudaTileI32EnumAttr/CudaTileI64EnumAttr definitions.
+#define GEN_ENUM_TYPE_TRAIT
+#include "AttrBytecode.inc"
+
+  /// Runtime version check for attribute tags.
+#define GEN_ATTR_VERSION_CHECK
+#include "AttrBytecode.inc"
 
   // Template for other native C++ types that need conversion
   template <typename T>
@@ -1232,6 +1251,14 @@ struct FunctionTableWriter {
       writer.writeByte(nativeValue ? 0x01 : 0x00);
       return success();
     } else if constexpr (is_cuda_tile_enum<T>::value) {
+      // Check per-value version requirements.
+      if (!isEnumValueAvailableInVersion<T>(nativeValue,
+                                            config.bytecodeVersion))
+        return op->emitError()
+               << "enum value for attribute '" << attrName
+               << "' is not available in bytecode version "
+               << static_cast<int>(config.bytecodeVersion.getMajor()) << "."
+               << static_cast<int>(config.bytecodeVersion.getMinor());
       writer.writeVarInt(static_cast<uint32_t>(nativeValue));
       return success();
     } else if constexpr (std::is_same_v<std::decay_t<T>,
@@ -1473,7 +1500,8 @@ private:
 static LogicalResult
 writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
                    StringManager &strMgr, TypeManager &typeMgr,
-                   ConstantManager &constMgr, DebugInfoWriter &debuginfo) {
+                   ConstantManager &constMgr, DebugInfoWriter &debuginfo,
+                   const BytecodeWriterConfig &config) {
   SmallVector<char> buffer;
   llvm::raw_svector_ostream sectionStream(buffer);
   EncodingWriter sectionWriter(sectionStream);
@@ -1486,7 +1514,31 @@ writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
     return success();
 
   sectionWriter.writeVarInt(globals.size());
+
+  static const auto kMinGlobalExtendedFields =
+      *BytecodeVersion::fromVersion(13, 3, 0);
+
   for (cuda_tile::GlobalOp globalOp : globals) {
+    // Global symbol visibility and the `constant` flag exist only in bytecode
+    // 13.3+. Refuse to emit older versions if we would silently lose semantics.
+    if (config.bytecodeVersion < kMinGlobalExtendedFields) {
+      if (globalOp.getSymbolVisibility() != SymbolVisibility::Public) {
+        return globalOp.emitError() << "global `" << globalOp.getSymName()
+                                    << "` uses non-public symbol visibility, "
+                                       "which cannot be encoded "
+                                       "in bytecode version "
+                                    << config.bytecodeVersion.toString()
+                                    << " (requires bytecode 13.3+)";
+      }
+      if (globalOp.getConstant()) {
+        return globalOp.emitError()
+               << "constant global `" << globalOp.getSymName()
+               << "` cannot be encoded in bytecode version "
+               << config.bytecodeVersion.toString()
+               << " (the `constant` attribute requires bytecode 13.3+)";
+      }
+    }
+
     // 1. Write symbol name index.
     sectionWriter.writeVarInt(strMgr.getStringIndex(globalOp.getSymName()));
 
@@ -1503,12 +1555,60 @@ writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
 
     // 4. Write alignment.
     sectionWriter.writeVarInt(globalOp.getAlignment());
+
+    // 5–6. Symbol visibility and constant flag (bytecode 13.3+ only). Must
+    // match parseGlobalSection: older versions read exactly four varints per
+    // global.
+    if (config.bytecodeVersion >= kMinGlobalExtendedFields) {
+      sectionWriter.writeVarInt(
+          static_cast<uint32_t>(globalOp.getSymbolVisibility()));
+      sectionWriter.writeVarInt(static_cast<uint32_t>(globalOp.getConstant()));
+    }
   }
 
   // Write the section header and the buffered content to the main output
   // stream.
   writeSectionHeader(stream, Bytecode::Section::Global, buffer.size(),
                      sectionWriter.getRequiredAlignment());
+  stream.write(buffer.data(), buffer.size());
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Producer Section
+//===----------------------------------------------------------------------===//
+// producer-section =:
+//   producerStringIndex[varint]  // Index into the string table
+//
+/// Write the producer section to the bytecode file.
+/// This section is optional and contains producer information (e.g., compiler
+/// version, build options) that identifies what tool generated this bytecode.
+/// Only available in bytecode version 13.3+.
+static LogicalResult writeProducerSection(raw_ostream &stream,
+                                          cuda_tile::ModuleOp module,
+                                          StringManager &strMgr,
+                                          const BytecodeWriterConfig &config) {
+  // Producer section is only available in version 13.3+.
+  static const auto kMinProducerVersion =
+      *BytecodeVersion::fromVersion(13, 3, 0);
+  if (config.bytecodeVersion < kMinProducerVersion)
+    return success();
+
+  auto producerAttr = module.getProducerAttr();
+  if (!producerAttr)
+    return success();
+
+  SmallVector<char> buffer;
+  llvm::raw_svector_ostream sectionStream(buffer);
+  EncodingWriter sectionWriter(sectionStream);
+
+  // Write the producer string index.
+  sectionWriter.writeVarInt(strMgr.getStringIndex(producerAttr.getValue()));
+
+  // Write the section header and the buffered content to the main output
+  // stream.
+  writeSectionHeader(stream, Bytecode::Section::Producer, buffer.size(),
+                     /*alignment=*/1);
   stream.write(buffer.data(), buffer.size());
   return success();
 }
@@ -1597,8 +1697,9 @@ LogicalResult cuda_tile::writeBytecode(raw_ostream &os,
   if (failed(funcWriter.buildFunctionMap(module)))
     return failure();
   if (failed(writeGlobalSection(os, module, stringMgr, typeMgr, constantMgr,
-                                debuginfo)))
+                                debuginfo, config))) {
     return failure();
+  }
   if (failed(funcWriter.writeFunctionTableSection(os)))
     return failure();
   if (failed(constantMgr.writeConstantSection(os)))
@@ -1606,6 +1707,8 @@ LogicalResult cuda_tile::writeBytecode(raw_ostream &os,
   if (failed(debuginfo.writeDebugInfoSection(os)))
     return failure();
   if (failed(typeMgr.writeTypeSection(os)))
+    return failure();
+  if (failed(writeProducerSection(os, module, stringMgr, config)))
     return failure();
   if (failed(stringMgr.writeStringSection(os)))
     return failure();

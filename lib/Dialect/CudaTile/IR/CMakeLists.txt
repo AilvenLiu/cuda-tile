@@ -27,6 +27,8 @@ add_mlir_library(CudaTileDialect
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRControlFlowInterfaces
+  MLIRFunctionInterfaces
   MLIRInferTypeOpInterface
   MLIRSideEffectInterfaces
   MLIRViewLikeInterface

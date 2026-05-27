@@ -20,6 +20,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "cuda_tile/Dialect/CudaTile/IR/Dialect.td"
 include "cuda_tile/Dialect/CudaTile/IR/Types.td"
 include "cuda_tile/Dialect/CudaTile/IR/AttrDefs.td"
+include "cuda_tile/Dialect/CudaTile/IR/TestingAttrs.td"
 
 //===----------------------------------------------------------------------===//
 // Testing Operations - Only available when TILE_IR_INCLUDE_TESTS is defined
@@ -90,14 +91,19 @@ def CudaTile_BytecodeTest_EvolutionOp :
   let description = [{
     The :code:`bytecode_evolution_test` operation tests bytecode versioning
     and backward compatibility when operations evolve by adding new optional
-    operands, results, and attributes across different bytecode versions.
+    operands, results, attributes, enum attrs, and standalone attrs across
+    different bytecode versions.
   }];
 
   let arguments = (ins
       CudaTileArg<Variadic<CudaTile_TileType>, "Base input from version 250.0.", "250.0">:$inputs,
-      CudaTileArg<OptionalAttr<I32Attr>, "Optional attribute added in 250.1 to test bit layout compatibility.", "250.1">:$new_attr,
+      CudaTileArg<OptionalAttr<I32Attr>, "Optional attribute added in 250.1.", "250.1">:$new_attr,
       CudaTileArg<Optional<CudaTile_TokenType>,
-                  "Optional token added in version 250.1.", "250.1">:$optional_token);
+                  "Optional token added in version 250.1.", "250.1">:$optional_token,
+      CudaTileArg<OptionalAttr<CudaTile_BytecodeTestPriorityAttr>,
+                  "Priority enum attr added in 250.0.", "250.0">:$priority,
+      CudaTileArg<OptionalAttr<CudaTile_BytecodeTestValueAttr>,
+                  "Standalone attr added in 250.1.", "250.1">:$test_attr);
 
   let results = (outs
       CudaTileArg<CudaTile_TokenType, "New token result added in version 250.1.", "250.1">:$result_token);
@@ -106,6 +112,8 @@ def CudaTile_BytecodeTest_EvolutionOp :
     `(` $inputs `:` type($inputs) `)`
     (`new_attr` `=` $new_attr^)?
     (`token` `=` $optional_token^ `:` custom<CudaTileType>(type($optional_token)))?
+    (`priority` `=` $priority^)?
+    (`test_attr` `=` $test_attr^)?
     `->` custom<CudaTileType>(type($result_token))
     attr-dict
   }];

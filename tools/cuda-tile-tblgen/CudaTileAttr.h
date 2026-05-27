@@ -6,10 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file defines the CUDA Tile IR Attribute wrapper for TableGen.
-//
-//===----------------------------------------------------------------------===//
 
 #ifndef CUDA_TILE_TOOLS_CUDATILETBLGEN_TILEIRATTR_H_
 #define CUDA_TILE_TOOLS_CUDATILETBLGEN_TILEIRATTR_H_

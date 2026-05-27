@@ -21,23 +21,19 @@ if(NOT DEFINED CUDA_TILE_TABLEGEN_EXE)
     message(FATAL_ERROR "CUDA_TILE_TABLEGEN_EXE is not defined")
 endif()
 
-# Generate bytecode writer functions from operations
-set(LLVM_TARGET_DEFINITIONS ../../../include/cuda_tile/Dialect/CudaTile/IR/Ops.td)
-tablegen(CUDA_TILE Bytecode.inc -gen-cuda-tile-bytecode)
-set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES
-             ${CMAKE_CURRENT_BINARY_DIR}/Bytecode.inc)
+# Helper macro to generate bytecode includes from TableGen definitions.
+macro(cuda_tile_tablegen output_file input_td gen_flag)
+  set(LLVM_TARGET_DEFINITIONS ${input_td})
+  tablegen(CUDA_TILE ${output_file} ${gen_flag})
+  set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES
+               ${CMAKE_CURRENT_BINARY_DIR}/${output_file})
+endmacro()
 
-# Generate opcode definitions from bytecode opcodes
-set(LLVM_TARGET_DEFINITIONS ../../../include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td)
-tablegen(CUDA_TILE StaticOpcodes.inc -gen-cuda-tile-opcodes)
-set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES
-             ${CMAKE_CURRENT_BINARY_DIR}/StaticOpcodes.inc)
-
-# Generate type bytecode functions from type opcodes
-set(LLVM_TARGET_DEFINITIONS ../../../include/cuda_tile/Dialect/CudaTile/IR/BytecodeTypeOpcodes.td)
-tablegen(CUDA_TILE TypeBytecode.inc -gen-cuda-tile-type-bytecode)
-set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES
-             ${CMAKE_CURRENT_BINARY_DIR}/TypeBytecode.inc)
+set(TD_DIR ${CUDA_TILE_SOURCE_DIR}/include/cuda_tile/Dialect/CudaTile/IR)
+cuda_tile_tablegen(Bytecode.inc ${TD_DIR}/Ops.td -gen-cuda-tile-bytecode)
+cuda_tile_tablegen(StaticOpcodes.inc ${TD_DIR}/BytecodeOpcodes.td -gen-cuda-tile-opcodes)
+cuda_tile_tablegen(TypeBytecode.inc ${TD_DIR}/BytecodeTypeOpcodes.td -gen-cuda-tile-type-bytecode)
+cuda_tile_tablegen(AttrBytecode.inc ${TD_DIR}/BytecodeAttrOpcodes.td -gen-cuda-tile-attr-bytecode)
 
 # Ensure the bytecode include is generated with other targets
 add_public_tablegen_target(CudaTileBytecodeIncGen)

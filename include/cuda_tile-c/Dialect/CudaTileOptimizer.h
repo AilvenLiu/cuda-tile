@@ -44,7 +44,7 @@ typedef struct {
 /// Initialize CUDA Tile IR Optimization config with default values
 MLIR_CAPI_EXPORTED void mlirCudaTileOptFlagsInit(mlirCudaTileOptConfig *config);
 
-/// Applies TileIR optimizations to a cuda_tile module operation.
+/// Applies CUDA Tile IR optimizations to a cuda_tile module operation.
 /// Returns true on success, false on failure.
 /// Note: This function extracts the cuda_tile module and applies the
 /// configured optimization pipeline.

@@ -1,4 +1,4 @@
-//===- BytecodeGen.cpp ------------------------------------------*- C++ -*-===//
+//===- BytecodeGen.cpp - CUDA Tile dialect bytecode generator ---*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -16,13 +16,15 @@
 #include "mlir/TableGen/GenInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/TableGen/Error.h"
-#include "llvm/TableGen/Record.h"
 #include "llvm/TableGen/TableGenBackend.h"
 
+#include "BytecodeAttrAnalysis.h"
+#include "BytecodeAttrCodeGen.h"
 #include "BytecodeGenUtilities.h"
 #include "BytecodeTypeAnalysis.h"
 #include "BytecodeTypeCodeGen.h"
@@ -32,6 +34,126 @@ using namespace llvm;
 using namespace mlir;
 using namespace mlir::tblgen;
 
+/// Reads an OpcodeRange definition from TableGen records.
+/// Returns {minValue, maxValue} or nullopt if not defined.
+static std::optional<std::pair<unsigned, unsigned>>
+getOpcodeRange(const RecordKeeper &records, StringRef name) {
+  const Record *def = records.getDef(name);
+  if (!def)
+    return std::nullopt;
+  return std::make_pair(static_cast<unsigned>(def->getValueAsInt("minValue")),
+                        static_cast<unsigned>(def->getValueAsInt("maxValue")));
+}
+
+/// Validates that all CudaTileOpDef operations have bytecode opcode
+/// assignments.
+static void validateAllOperationsHaveOpcodes(
+    const RecordKeeper &records,
+    const llvm::DenseSet<StringRef> &opsWithOpcodes) {
+  for (const Record *opDef :
+       records.getAllDerivedDefinitions("CudaTileOpDef")) {
+    if (!opsWithOpcodes.count(opDef->getName()))
+      PrintFatalError(opDef->getLoc(),
+                      "operation '" + Operator(opDef).getOperationName() +
+                          "' is missing BytecodeOpcode assignment");
+  }
+}
+
+/// Validates all opcode assignments for consistency and correctness.
+/// Checks:
+/// - Opcode values are within designated ranges for each opcode class.
+/// - No duplicate opcode values across all assignments.
+/// - No duplicate operation assignments.
+/// - Opcode class matches operation type.
+static void
+validateAllOpcodeAssignments(const RecordKeeper &records,
+                             ArrayRef<const Record *> opcodeRecords) {
+  // Track seen opcode values and operations to detect duplicates.
+  llvm::DenseMap<unsigned, const Record *> seenOpcodes;
+  llvm::DenseMap<StringRef, const Record *> seenOperations;
+  llvm::DenseSet<StringRef> opsWithOpcodes;
+
+  for (const Record *record : opcodeRecords) {
+    const Record *opRecord = record->getValueAsDef("operation");
+    unsigned opcodeValue = record->getValueAsInt("opcodeValue");
+    StringRef opName = opRecord->getName();
+
+    // Check for duplicate opcode values.
+    if (auto it = seenOpcodes.find(opcodeValue); it != seenOpcodes.end()) {
+      PrintFatalError(
+          record->getLoc(),
+          "duplicate opcode value 0x" + llvm::utohexstr(opcodeValue) +
+              " - already assigned to operation in " + it->second->getName());
+    }
+    seenOpcodes[opcodeValue] = record;
+
+    // Check for duplicate operation assignments.
+    if (auto it = seenOperations.find(opName); it != seenOperations.end()) {
+      PrintFatalError(record->getLoc(),
+                      "operation '" + opName +
+                          "' has multiple opcode assignments - already "
+                          "assigned in " +
+                          it->second->getName());
+    }
+    seenOperations[opName] = record;
+    opsWithOpcodes.insert(opName);
+
+    // Validate opcode ranges and operation type consistency.
+    if (record->isSubClassOf("PublicOpcode")) {
+      auto publicRange = getOpcodeRange(records, "PublicOpcodeRange");
+      auto testingRange = getOpcodeRange(records, "TestingOpcodeRange");
+
+      // Public opcodes must be in public range or testing range.
+      auto inRange = [&](auto &range) {
+        return range && opcodeValue >= range->first &&
+               opcodeValue <= range->second;
+      };
+
+      if (!inRange(publicRange) && !inRange(testingRange)) {
+        std::string rangeMsg = "PublicOpcode value 0x" +
+                               llvm::utohexstr(opcodeValue) +
+                               " is out of range (must be ";
+        if (publicRange)
+          rangeMsg += "0x" + llvm::utohexstr(publicRange->first) + " - 0x" +
+                      llvm::utohexstr(publicRange->second);
+        if (publicRange && testingRange)
+          rangeMsg += " or ";
+        if (testingRange)
+          rangeMsg += ">= 0x" + llvm::utohexstr(testingRange->first);
+        rangeMsg += ")";
+        PrintFatalError(record->getLoc(), rangeMsg);
+      }
+
+      // Testing operation validation.
+      if (testingRange && records.getClass("CudaTileTestingOpDef")) {
+        bool inTestingRange = opcodeValue >= testingRange->first;
+        // Testing operations must use testing opcode range.
+        if (opRecord->isSubClassOf("CudaTileTestingOpDef")) {
+          if (!inTestingRange)
+            PrintFatalError(record->getLoc(),
+                            "Testing operation '" + opName +
+                                "' must use testing opcode range (>= 0x" +
+                                llvm::utohexstr(testingRange->first) +
+                                "), but has opcode 0x" +
+                                llvm::utohexstr(opcodeValue));
+        } else {
+          // Non-testing operations must not use testing opcode range.
+          if (inTestingRange)
+            PrintFatalError(record->getLoc(),
+                            "Non-testing operation '" + opName +
+                                "' cannot use testing opcode range (>= 0x" +
+                                llvm::utohexstr(testingRange->first) +
+                                "). This range is reserved for testing.");
+        }
+      }
+    }
+
+  }
+
+  // Validate all operations have opcode assignments.
+  validateAllOperationsHaveOpcodes(records, opsWithOpcodes);
+}
+
 /// Generates the opcode enum definition from TableGen records.
 static void generateOpcodeEnumDefinition(const RecordKeeper &records,
                                          raw_ostream &os) {
@@ -39,6 +161,9 @@ static void generateOpcodeEnumDefinition(const RecordKeeper &records,
 
   // Get all BytecodeOpcode records.
   auto opcodeRecords = records.getAllDerivedDefinitions("BytecodeOpcode");
+
+  // Validate all opcode assignments before generating code.
+  validateAllOpcodeAssignments(records, opcodeRecords);
 
   os << "namespace mlir {\n"
      << "namespace cuda_tile {\n"
@@ -746,6 +871,36 @@ static void generateVersionValidation(const RecordKeeper &records,
   os << "  return std::nullopt;\n";
 }
 
+/// Generate getSupportedVersions() function from SupportedVersion records.
+static void generateSupportedVersionsList(const RecordKeeper &records,
+                                          raw_ostream &os) {
+  emitSourceFileHeader("Generated Supported Versions List", os);
+  auto versionRecords = records.getAllDerivedDefinitions("SupportedVersion");
+
+  // Collect and sort all versions.
+  std::vector<std::pair<uint8_t, uint8_t>> versions;
+  for (const Record *record : versionRecords) {
+    unsigned major = record->getValueAsInt("majorVersion");
+    unsigned minor = record->getValueAsInt("minorVersion");
+    versions.emplace_back(uint8_t(major), uint8_t(minor));
+  }
+  llvm::sort(versions);
+
+  std::string versionList;
+  llvm::raw_string_ostream vos(versionList);
+  llvm::interleaveComma(versions, vos, [&](const auto &v) {
+    vos << llvm::formatv("*BytecodeVersion::fromVersion({0}, {1}, 0)",
+                         static_cast<int>(v.first), static_cast<int>(v.second));
+  });
+
+  os << llvm::formatv(R"(// Auto-generated list of supported bytecode versions.
+llvm::SmallVector<BytecodeVersion> mlir::cuda_tile::getSupportedVersions() {{
+  return {{{0}};
+}
+)",
+                      versionList);
+}
+
 /// Generate opcode definitions in single file with ifdef guards
 static bool generateOpcodes(const RecordKeeper &records, raw_ostream &os) {
   os << "//===-- Begin Opcode Enum --===//\n";
@@ -774,7 +929,14 @@ static bool generateOpcodes(const RecordKeeper &records, raw_ostream &os) {
   generateVersionValidation(records, os);
   os << "#undef GEN_VERSION_VALIDATION\n";
   os << "#endif // GEN_VERSION_VALIDATION\n";
-  os << "//===-- End Version Validation --===//\n";
+  os << "//===-- End Version Validation --===//\n\n";
+
+  os << "//===-- Begin Supported Versions List --===//\n";
+  os << "#ifdef GEN_SUPPORTED_VERSIONS_LIST\n\n";
+  generateSupportedVersionsList(records, os);
+  os << "#undef GEN_SUPPORTED_VERSIONS_LIST\n";
+  os << "#endif // GEN_SUPPORTED_VERSIONS_LIST\n";
+  os << "//===-- End Supported Versions List --===//\n";
 
   return false;
 }
@@ -810,7 +972,75 @@ static bool generateTypeBytecode(const RecordKeeper &records, raw_ostream &os) {
   generateSerializerDispatch(structure, os);
   os << "#undef GEN_TYPE_WRITER_DISPATCH\n";
   os << "#endif // GEN_TYPE_WRITER_DISPATCH\n";
-  os << "//===-- End Type Writer Dispatch --===//\n";
+  os << "//===-- End Type Writer Dispatch --===//\n\n";
+
+  os << "//===-- Begin Dependent Type Registration --===//\n";
+  os << "#ifdef GEN_DEPENDENT_TYPE_REGISTRATION\n\n";
+  generateDependentTypeRegistration(structure, os);
+  os << "#undef GEN_DEPENDENT_TYPE_REGISTRATION\n";
+  os << "#endif // GEN_DEPENDENT_TYPE_REGISTRATION\n";
+  os << "//===-- End Dependent Type Registration --===//\n";
+
+  return false;
+}
+
+/// Generate attribute bytecode definitions including:
+/// - AttributeTag enum
+/// - Runtime version checking function
+static bool generateAttrBytecode(const RecordKeeper &records, raw_ostream &os) {
+  BytecodeAttrStructure structure = analyzeBytecodeAttrs(records);
+
+  if (failed(validateAttrTagAssignments(records, structure)))
+    return true;
+
+  // Generate the AttributeTag enum.
+  os << "//===-- Begin Attribute Tag Enum --===//\n";
+  os << "#ifdef GEN_ATTR_TAG_ENUM\n\n";
+  generateAttrTagEnum(structure, os);
+  os << "\n#undef GEN_ATTR_TAG_ENUM\n";
+  os << "#endif // GEN_ATTR_TAG_ENUM\n";
+  os << "//===-- End Attribute Tag Enum --===//\n\n";
+
+  // Generate the runtime version checking function.
+  os << "//===-- Begin Attribute Version Check --===//\n";
+  os << "#ifdef GEN_ATTR_VERSION_CHECK\n";
+  generateAttrVersionCheck(structure, os);
+  os << "\n#undef GEN_ATTR_VERSION_CHECK\n";
+  os << "#endif // GEN_ATTR_VERSION_CHECK\n";
+  os << "//===-- End Attribute Version Check --===//\n\n";
+
+  // Generate is_cuda_tile_enum type trait for BytecodeWriter.
+  os << "//===-- Begin Enum Type Trait --===//\n";
+  os << "#ifdef GEN_ENUM_TYPE_TRAIT\n";
+  generateEnumTypeTrait(structure, os);
+  os << "\n#undef GEN_ENUM_TYPE_TRAIT\n";
+  os << "#endif // GEN_ENUM_TYPE_TRAIT\n";
+  os << "//===-- End Enum Type Trait --===//\n\n";
+
+  // Generate is_cuda_tile_enum_attr type trait + symbolizeEnum for
+  // BytecodeReader.
+  os << "//===-- Begin Enum Attr Type Trait --===//\n";
+  os << "#ifdef GEN_ENUM_ATTR_TYPE_TRAIT\n";
+  generateEnumAttrTypeTrait(structure, os);
+  os << "\n#undef GEN_ENUM_ATTR_TYPE_TRAIT\n";
+  os << "#endif // GEN_ENUM_ATTR_TYPE_TRAIT\n";
+  os << "//===-- End Enum Attr Type Trait --===//\n\n";
+
+  // Generate enum attr version checking for BytecodeReader.
+  os << "//===-- Begin Enum Attr Version Check --===//\n";
+  os << "#ifdef GEN_ENUM_ATTR_VERSION_CHECK\n";
+  generateEnumAttrVersionCheck(structure, os);
+  os << "\n#undef GEN_ENUM_ATTR_VERSION_CHECK\n";
+  os << "#endif // GEN_ENUM_ATTR_VERSION_CHECK\n";
+  os << "//===-- End Enum Attr Version Check --===//\n\n";
+
+  // Generate per-value version checking for BytecodeWriter.
+  os << "//===-- Begin Enum Value Version Check --===//\n";
+  os << "#ifdef GEN_ENUM_VALUE_VERSION_CHECK\n";
+  generateEnumValueVersionCheck(structure, os);
+  os << "\n#undef GEN_ENUM_VALUE_VERSION_CHECK\n";
+  os << "#endif // GEN_ENUM_VALUE_VERSION_CHECK\n";
+  os << "//===-- End Enum Value Version Check --===//\n";
 
   return false;
 }
@@ -836,3 +1066,10 @@ static mlir::GenRegistration
                             [](const RecordKeeper &records, raw_ostream &os) {
                               return generateTypeBytecode(records, os);
                             });
+
+static mlir::GenRegistration genCudaTileAttrBytecode(
+    "gen-cuda-tile-attr-bytecode",
+    "Generate cuda_tile attribute bytecode definitions.",
+    [](const RecordKeeper &records, raw_ostream &os) {
+      return generateAttrBytecode(records, os);
+    });

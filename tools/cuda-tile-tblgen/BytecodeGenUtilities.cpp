@@ -1,4 +1,4 @@
-//===- BytecodeGenUtilities.cpp ---------------------------------*- C++ -*-===//
+//===- BytecodeGenUtilities.cpp - Bytecode Gen Utilities --------*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -23,8 +23,8 @@
 using namespace llvm;
 using namespace mlir;
 
-static std::pair<std::string, std::string>
-parseVersionString(StringRef version) {
+std::pair<std::string, std::string>
+mlir::tblgen::parseVersion(StringRef version) {
   const size_t dotPos = version.find('.');
   const StringRef majorStr = version.substr(0, dotPos);
   const StringRef minorStr =
@@ -51,7 +51,7 @@ mlir::tblgen::extractVersionFromAttribute(const NamedAttribute &namedAttr,
 
       const std::string version =
           decorator.getDef().getValueAsString("sinceVersion").str();
-      return parseVersionString(version);
+      return parseVersion(version);
     }
 
     // Found attribute but missing required metadata.
@@ -104,7 +104,7 @@ mlir::tblgen::extractVersionFromOperand(unsigned operandIndex,
 
           const std::string version =
               decorator.getDef().getValueAsString("sinceVersion").str();
-          return parseVersionString(version);
+          return parseVersion(version);
         }
 
         // Found operand but no metadata.
@@ -193,7 +193,7 @@ mlir::tblgen::extractVersionFromResult(unsigned resultIndex,
 
     const std::string version =
         decorator.getDef().getValueAsString("sinceVersion").str();
-    return parseVersionString(version);
+    return parseVersion(version);
   }
 
   // Result missing required metadata.

@@ -298,6 +298,33 @@ cuda_tile.module @exp_invalid_type_i32 {
 
 // -----
 
+cuda_tile.module @exp_invalid_approx_f64_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xf64>) {
+        // expected-error @below{{approx modifier only supported for f32 data type, but got: 'f64'}}
+        %0 = cuda_tile.exp %arg0 rounding<approx> : !cuda_tile.tile<4xf64>
+    }
+}
+
+// -----
+
+cuda_tile.module @exp_invalid_approx_f16_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xf16>) {
+        // expected-error @below{{approx modifier only supported for f32 data type, but got: 'f16'}}
+        %0 = cuda_tile.exp %arg0 rounding<approx> : !cuda_tile.tile<4xf16>
+    }
+}
+
+// -----
+
+cuda_tile.module @exp_invalid_approx_bf16_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xbf16>) {
+        // expected-error @below{{approx modifier only supported for f32 data type, but got: 'bf16'}}
+        %0 = cuda_tile.exp %arg0 rounding<approx> : !cuda_tile.tile<4xbf16>
+    }
+}
+
+// -----
+
 // ****************** cuda_tile.floor ******************
 cuda_tile.module @floor_mismatching_rank_input_output {// expected-note @below{{prior use here}}
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>) {
@@ -816,6 +843,38 @@ cuda_tile.module @tan_invalid_f8_element {
 
 // -----
 
+// ****************** cuda_tile.atan2 ******************
+
+// Test atan2 rejects integer types
+cuda_tile.module @atan2_invalid_int_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2xi32>, %arg1: !cuda_tile.tile<2xi32>) {
+        // expected-error @below{{'cuda_tile.atan2' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2xi32>'}}
+        %0 = cuda_tile.atan2 %arg0, %arg1 : !cuda_tile.tile<2xi32>
+    }
+}
+
+// -----
+
+// Test atan2 rejects mismatched types
+cuda_tile.module @atan2_mismatching_elementtype_inputs {// expected-note @below{{prior use here}}
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2xf32>, %arg1: !cuda_tile.tile<2xf64>) {
+        // expected-error @below{{use of value '%arg1' expects different type than prior uses}}
+        %0 = cuda_tile.atan2 %arg0, %arg1 : !cuda_tile.tile<2xf32>
+    }
+}
+
+// -----
+
+// Test atan2 rejects tf32 (only base float types f16/bf16/f32/f64 allowed)
+cuda_tile.module @atan2_invalid_tf32_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2xtf32>, %arg1: !cuda_tile.tile<2xtf32>) {
+        // expected-error @below{{'cuda_tile.atan2' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2xtf32>'}}
+        %0 = cuda_tile.atan2 %arg0, %arg1 : !cuda_tile.tile<2xtf32>
+    }
+}
+
+// -----
+
 // ****************** cuda_tile.tanh ******************
 cuda_tile.module @tanh_mismatching_rank_input_output {// expected-note @below{{prior use here}}
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>) {
@@ -858,4 +917,44 @@ cuda_tile.module @tanh_invalid_f8_element {
         // expected-error @below{{'cuda_tile.tanh' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xf8E5M2>'}}
         %0 = cuda_tile.tanh %arg0 : !cuda_tile.tile<2x4x8xf8E5M2>
     }
+}
+
+// -----
+
+// Test tanh rejects invalid rounding mode (only approx/full allowed)
+cuda_tile.module @tanh_invalid_rnd_modifier {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xf32>) {
+        // expected-error @below{{'cuda_tile.tanh' op invalid rounding mode specified, expect one of [approx, full]}}
+        %0 = cuda_tile.tanh %arg0 rounding<nearest_even> : !cuda_tile.tile<4xf32>
+    }
+}
+
+// -----
+
+// Test tanh approx rejects f16 (approx only for f32)
+cuda_tile.module @tanh_approx_invalid_f16 {
+  cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xf16>) {
+    // expected-error @below{{approx modifier only supported for f32 data type, but got: 'f16'}}
+    %0 = cuda_tile.tanh %arg0 rounding<approx> : !cuda_tile.tile<4xf16>
+  }
+}
+
+// -----
+
+// Test tanh approx rejects bf16 (approx only for f32)
+cuda_tile.module @tanh_approx_invalid_bf16 {
+  cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xbf16>) {
+    // expected-error @below{{approx modifier only supported for f32 data type, but got: 'bf16'}}
+    %0 = cuda_tile.tanh %arg0 rounding<approx> : !cuda_tile.tile<4xbf16>
+  }
+}
+
+// -----
+
+// Test tanh approx rejects f64 (approx only for f32)
+cuda_tile.module @tanh_approx_invalid_f64 {
+  cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<4xf64>) {
+    // expected-error @below{{approx modifier only supported for f32 data type, but got: 'f64'}}
+    %0 = cuda_tile.tanh %arg0 rounding<approx> : !cuda_tile.tile<4xf64>
+  }
 } 

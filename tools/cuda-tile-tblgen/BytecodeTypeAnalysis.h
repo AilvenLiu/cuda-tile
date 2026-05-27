@@ -34,6 +34,10 @@ namespace mlir::tblgen {
 ///   isOptional: True for OptionalParameter<...>
 ///   enumTypeName: For OptionalEnum, underlying enum type.
 ///   kind: Classification for code generation.
+///   sinceVersion: Version when parameter was introduced.
+///   defaultValue: Default value for parameter.
+///   usesOptionalTypeFlags: True for OptionalParameter with null default
+///     (uses bitfield encoding; DefaultValuedParameter uses version checks).
 struct BytecodeTypeParameter {
   enum class Kind {
     GenericType,
@@ -41,7 +45,8 @@ struct BytecodeTypeParameter {
     Int64Array,
     Int32Array,
     DenseI32Array,
-    OptionalEnum
+    OptionalEnum,
+    UInt32Scalar
   };
 
   BytecodeTypeParameter(const AttrOrTypeParameter &param);
@@ -58,7 +63,16 @@ public:
   bool isOptional;
   std::string enumTypeName;
   Kind kind;
+  std::string sinceVersion;
+  std::string defaultValue;
+  bool usesOptionalTypeFlags = false;
 };
+
+/// Check if parameter is a Type parameter (Generic or Specific).
+inline bool isTypeParameter(BytecodeTypeParameter::Kind kind) {
+  return kind == BytecodeTypeParameter::Kind::GenericType ||
+         kind == BytecodeTypeParameter::Kind::SpecificType;
+}
 
 //===----------------------------------------------------------------------===//
 // CudaTileType - Analyzed CudaTile type information
@@ -72,6 +86,10 @@ public:
 ///   sinceVersion: Version string.
 ///   parameters: Analyzed type parameters.
 ///   needsReverseOrder: True for TileType.
+///   skipVersionCheck: True for types that skip version checks.
+///   hasOptionalTypeParams: True if type has optional Type parameters.
+///   firstOptionalTypeParamVersion: Version when first optional Type param was
+///   added.
 struct CudaTileType {
   CudaTileType(const AttrOrTypeDef &typeDef, unsigned tagValue,
                StringRef version);
@@ -80,8 +98,11 @@ struct CudaTileType {
   std::string qualifiedTypeName;
   unsigned typeTagValue;
   std::string sinceVersion;
-  SmallVector<BytecodeTypeParameter> parameters;
+  SmallVector<BytecodeTypeParameter, 4> parameters;
   bool needsReverseOrder;
+  bool skipVersionCheck = false;
+  bool hasOptionalTypeParams = false;
+  std::string firstOptionalTypeParamVersion = "";
 };
 
 //===----------------------------------------------------------------------===//

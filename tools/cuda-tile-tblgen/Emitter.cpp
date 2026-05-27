@@ -155,16 +155,18 @@ void SpecEmitter::emitLiteralInclude(
     const std::vector<std::tuple<int, int>> &lineRanges,
     const std::string &language, const std::optional<int> dedent) {
   this->os << ".. literalinclude:: " << fileName << "\n";
-  this->os << indent << ":lines: ";
-  size_t i = 0;
-  for (const auto &lines : lineRanges) {
-    this->os << std::get<0>(lines) << "-" << std::get<1>(lines);
-    i++;
-    if (i != lineRanges.size()) {
-      this->os << ",";
+  if (!lineRanges.empty()) {
+    this->os << indent << ":lines: ";
+    size_t i = 0;
+    for (const auto &lines : lineRanges) {
+      this->os << std::get<0>(lines) << "-" << std::get<1>(lines);
+      i++;
+      if (i != lineRanges.size()) {
+        this->os << ",";
+      }
     }
+    this->os << "\n";
   }
-  this->os << "\n";
   this->os << indent << ":language: " << language << "\n";
   if (dedent) {
     this->os << indent << ":dedent: " << dedent.value() << "\n";
@@ -172,10 +174,9 @@ void SpecEmitter::emitLiteralInclude(
   this->os << "\n";
 }
 
-void SpecEmitter::emitExample(const std::string &exampleName,
-                              const std::string &exampleAnchor,
-                              const std::string &fileName,
-                              const std::string &example) {
+void SpecEmitter::writeExampleToDiskAndAppendToAppendix(
+    const std::string &exampleName, const std::string &exampleAnchor,
+    const std::string &fileName, const std::string &example) {
   // If the example directory is not set, do nothing.
   if (!this->examplesDirectory) {
     return;
@@ -225,6 +226,24 @@ void SpecEmitter::emitExample(const std::string &exampleName,
   // Write content to file
   outFile << example;
   outFile.close();
+}
+
+void SpecEmitter::emitExample(const std::string &exampleName,
+                              const FormattedExample &formattedExample) {
+
+  auto exampleFileName = "example_" + exampleName + ".mlir";
+  auto exampleAnchor = "example_" + exampleName;
+  auto exampleFilePath = "/_spec_gen/examples/" + exampleFileName;
+  this->writeExampleToDiskAndAppendToAppendix(
+      exampleName, exampleAnchor, exampleFileName, formattedExample.content);
+
+  this->emitLiteralInclude(exampleFilePath, exampleAnchor,
+                           formattedExample.lineRanges, "mlir",
+                           formattedExample.dedent);
+
+  // Investigate whether we can attach this as caption text to the example.
+  this->os << "See :ref:`" << exampleAnchor
+           << "` for the full example listing.\n\n";
 }
 
 } // namespace tblgen

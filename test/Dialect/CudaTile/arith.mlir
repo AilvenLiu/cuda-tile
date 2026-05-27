@@ -1605,6 +1605,10 @@ entry @floordivi() {
     %c42_f32 = constant <f32: 42.000000e+00> : !cuda_tile.tile<f32>
     // CHECK: tanh %[[c42_f32]] : tile<f32>
     %tanh_f32 = tanh %c42_f32 : tile<f32>
+    // CHECK: tanh %[[c42_f32]] rounding<approx> : tile<f32>
+    %tanh_approx = tanh %c42_f32 rounding<approx> : tile<f32>
+    // CHECK: tanh %[[c42_f32]] : tile<f32>
+    %tanh_full = tanh %c42_f32 rounding<full> : tile<f32>
 
     // CHECK: %[[c42_f64:.*]] = constant <f64: 4.200000e+01> : tile<f64>
     %c42_f64 = constant <f64: 42.000000e+00> : !cuda_tile.tile<f64>
@@ -1633,5 +1637,67 @@ entry @floordivi() {
     %c_f64tensor = constant <f64: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf64>
     // CHECK: tanh %[[c_f64tensor]] : tile<2x2xf64>
     %res_f64tensor = tanh %c_f64tensor : tile<2x2xf64>
+  }
+
+  entry @atan2() {
+    // CHECK-LABEL: entry @atan2
+    // CHECK: %[[c1_f16:.*]] = constant <f16: 1.000000e+00> : tile<f16>
+    %c1_f16 = constant <f16: 1.000000e+00> : !cuda_tile.tile<f16>
+    // CHECK: %[[c2_f16:.*]] = constant <f16: 2.000000e+00> : tile<f16>
+    %c2_f16 = constant <f16: 2.000000e+00> : !cuda_tile.tile<f16>
+    // CHECK: atan2 %[[c1_f16]], %[[c2_f16]] : tile<f16>
+    %atan2_f16 = atan2 %c1_f16, %c2_f16 : tile<f16>
+
+    // CHECK: %[[c1_bf16:.*]] = constant <bf16: 1.000000e+00> : tile<bf16>
+    %c1_bf16 = constant <bf16: 1.000000e+00> : !cuda_tile.tile<bf16>
+    // CHECK: %[[c2_bf16:.*]] = constant <bf16: 2.000000e+00> : tile<bf16>
+    %c2_bf16 = constant <bf16: 2.000000e+00> : !cuda_tile.tile<bf16>
+    // CHECK: atan2 %[[c1_bf16]], %[[c2_bf16]] : tile<bf16>
+    %atan2_bf16 = atan2 %c1_bf16, %c2_bf16 : tile<bf16>
+
+    // CHECK: %[[c1_f32:.*]] = constant <f32: 1.000000e+00> : tile<f32>
+    %c1_f32 = constant <f32: 1.000000e+00> : !cuda_tile.tile<f32>
+    // CHECK: %[[c2_f32:.*]] = constant <f32: 2.000000e+00> : tile<f32>
+    %c2_f32 = constant <f32: 2.000000e+00> : !cuda_tile.tile<f32>
+    // CHECK: atan2 %[[c1_f32]], %[[c2_f32]] : tile<f32>
+    %atan2_f32 = atan2 %c1_f32, %c2_f32 : tile<f32>
+
+    // CHECK: %[[c1_f64:.*]] = constant <f64: 1.000000e+00> : tile<f64>
+    %c1_f64 = constant <f64: 1.000000e+00> : !cuda_tile.tile<f64>
+    // CHECK: %[[c2_f64:.*]] = constant <f64: 2.000000e+00> : tile<f64>
+    %c2_f64 = constant <f64: 2.000000e+00> : !cuda_tile.tile<f64>
+    // CHECK: atan2 %[[c1_f64]], %[[c2_f64]] : tile<f64>
+    %atan2_f64 = atan2 %c1_f64, %c2_f64 : tile<f64>
+  }
+
+  entry @atan2_tensor() {
+    // CHECK-LABEL: entry @atan2_tensor
+    // CHECK: %[[cy_f16tensor:.*]] = constant <f16: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf16>
+    %cy_f16tensor = constant <f16: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf16>
+    // CHECK: %[[cx_f16tensor:.*]] = constant <f16: 1.000000e+00> : tile<2x2xf16>
+    %cx_f16tensor = constant <f16: [[1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00]]> : !cuda_tile.tile<2x2xf16>
+    // CHECK: atan2 %[[cy_f16tensor]], %[[cx_f16tensor]] : tile<2x2xf16>
+    %res_f16tensor = atan2 %cy_f16tensor, %cx_f16tensor : tile<2x2xf16>
+
+    // CHECK: %[[cy_bf16tensor:.*]] = constant <bf16: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xbf16>
+    %cy_bf16tensor = constant <bf16: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xbf16>
+    // CHECK: %[[cx_bf16tensor:.*]] = constant <bf16: 1.000000e+00> : tile<2x2xbf16>
+    %cx_bf16tensor = constant <bf16: [[1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00]]> : !cuda_tile.tile<2x2xbf16>
+    // CHECK: atan2 %[[cy_bf16tensor]], %[[cx_bf16tensor]] : tile<2x2xbf16>
+    %res_bf16tensor = atan2 %cy_bf16tensor, %cx_bf16tensor : tile<2x2xbf16>
+
+    // CHECK: %[[cy_f32tensor:.*]] = constant <f32: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf32>
+    %cy_f32tensor = constant <f32: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf32>
+    // CHECK: %[[cx_f32tensor:.*]] = constant <f32: 1.000000e+00> : tile<2x2xf32>
+    %cx_f32tensor = constant <f32: [[1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00]]> : !cuda_tile.tile<2x2xf32>
+    // CHECK: atan2 %[[cy_f32tensor]], %[[cx_f32tensor]] : tile<2x2xf32>
+    %res_f32tensor = atan2 %cy_f32tensor, %cx_f32tensor : tile<2x2xf32>
+
+    // CHECK: %[[cy_f64tensor:.*]] = constant <f64: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf64>
+    %cy_f64tensor = constant <f64: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf64>
+    // CHECK: %[[cx_f64tensor:.*]] = constant <f64: 1.000000e+00> : tile<2x2xf64>
+    %cx_f64tensor = constant <f64: [[1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00]]> : !cuda_tile.tile<2x2xf64>
+    // CHECK: atan2 %[[cy_f64tensor]], %[[cx_f64tensor]] : tile<2x2xf64>
+    %res_f64tensor = atan2 %cy_f64tensor, %cx_f64tensor : tile<2x2xf64>
   }
 }

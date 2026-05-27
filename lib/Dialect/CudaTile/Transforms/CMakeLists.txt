@@ -2,6 +2,7 @@ add_mlir_library(CudaTileTransforms
   FuseFMA.cpp
   LoopSplit.cpp
   SynthesizeDebugInfoScopes.cpp
+  TransformsUtils.cpp
 
   DEPENDS
   CudaTileTransformsIncGen

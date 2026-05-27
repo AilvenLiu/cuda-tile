@@ -1,13 +1,9 @@
-//===- CudaTileType.h - CUDA Tile operation definitions ---------*- C++ -*-===//
+//===- CudaTileType.h - CUDA Tile IR Type wrapper for TableGen --*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
 //
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-//===----------------------------------------------------------------------===//
-//
-// This file defines the CUDA Tile IR Type wrapper for TableGen.
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,12 +35,14 @@ namespace tblgen {
 
 enum CudaTileElementType {
   kI1,
+  kI4,
   kI8,
   kI16,
   kI32,
   kI64,
   kF8E4M3FN,
   kF8E5M2,
+  kF4E2M1FN,
   kF16,
   kF32,
   kF64,
@@ -109,33 +107,33 @@ struct TileIRType {
   // A type that represents a element with a set of allowed element types.
   static TileIRType tile(const std::vector<TileIRType> &allowedTypes);
 
-  // A type that represents any valid Tile IR
+  // A type that represents any valid CUDA Tile IR
   static TileIRType any_type();
 
   // A type that represents a token.
   static TileIRType token();
 
-  // A type that represents a Tile IR tensor view.
+  // A type that represents a CUDA Tile IR tensor view.
   static TileIRType tensor_view();
 
-  // A type that represents a Tile IR integer tensor (i1/i8/i16/i32/i64).
+  // A type that represents a CUDA Tile IR integer tensor (i1/i8/i16/i32/i64).
   static TileIRType int_tile();
 
-  // A type that represents a Tile IR base float tensor (f16/bf16/f32/f64).
+  // A type that represents a CUDA Tile IR base float tensor (f16/bf16/f32/f64).
   static TileIRType base_float_tile();
 
-  // A type that represents a Tile IR float tensor
+  // A type that represents a CUDA Tile IR float tensor
   // (f8e4m3fn/f8e5m2/f16/bf16/f32/tf32/f64).
   static TileIRType float_tile();
 
-  // A type that represents a Tile IR numeric tensor.
+  // A type that represents a CUDA Tile IR numeric tensor.
   static TileIRType numeric_tile();
 
-  // A type that represents a Tile IR tile with any element type.
+  // A type that represents a CUDA Tile IR tile with any element type.
   static TileIRType any_tile();
 
-  // A type that represents a pointer to a Tile IR type with the given element
-  // types.
+  // A type that represents a pointer to a CUDA Tile IR type with the given
+  // element types.
   static TileIRType pointer(const std::vector<TileIRType> &elementTypes);
 
   // A type that represents an builtin type.
@@ -164,7 +162,7 @@ struct TileIRType {
                                   const TileIRType &descriptor);
 };
 
-// A type that represents any valid Tile IR type.
+// A type that represents any valid CUDA Tile IR type.
 struct AnyType : TileIRTypeBase {
   AnyType() : TileIRTypeBase(kAnyType) {}
 };

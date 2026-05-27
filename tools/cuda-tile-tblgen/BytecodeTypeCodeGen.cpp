@@ -9,9 +9,14 @@
 
 #include "BytecodeTypeCodeGen.h"
 
+#include "mlir/Support/IndentedOstream.h"
+#include "mlir/TableGen/Format.h"
+
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/TableGen/Error.h"
 #include "llvm/TableGen/TableGenBackend.h"
+
+#include "BytecodeGenUtilities.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -59,57 +64,83 @@ LogicalResult serialize{0}({1} type,
 
 /// {0}: Getter call.
 static const char *const serializeArrayTemplate =
-    "  writer.writeLEVarSize({0});\n";
+    "writer.writeLEVarSize({0});\n";
 static const char *const serializeDenseI32ArrayTemplate =
-    "  writer.writeLEVarSize({0}.asArrayRef());\n";
+    "writer.writeLEVarSize({0}.asArrayRef());\n";
 static const char *const serializeTypeTemplate = R"(
-  if (failed(writeTypeIndex({0}, writer)))
-    return failure();
+if (failed(writeTypeIndex({0}, writer)))
+  return failure();
 )";
-/// {0}: Getter call, {1}: Enum type
+/// Runtime template for OptionalEnum (includes both formats).
+/// {0}: Getter call, {1}: Enum type, {2}: Runtime flag variable
 static const char *const serializeOptionalEnumTemplate = R"(
+if ({2}) {{
+  if ({0})
+    writer.writeVarInt(static_cast<std::underlying_type_t<{1}>>({0}.getValue()));
+} else {{
   writer.writeByte({0} != nullptr);
   if ({0})
     writer.writeVarInt(static_cast<std::underlying_type_t<{1}>>({0}.getValue()));
+}
+)";
+/// Templates for deserialization of original parameters.
+/// {0}: Variable name.
+static const char *const readArrayTemplate = R"(
+if (failed(reader.readLEVarSize({0})))
+ return reader.emitError() << "failed to read {0}";
+)";
+
+/// Template for uint32_t scalar serialization.
+/// {0}: Getter call.
+static const char *const serializeUInt32ScalarTemplate =
+    "writer.writeVarInt(static_cast<uint64_t>({0}));\n";
+
+/// Template for uint32_t scalar deserialization.
+/// {0}: Variable name.
+static const char *const readUInt32ScalarTemplate = R"(
+uint64_t {0}_raw;
+if (failed(reader.readVarInt({0}_raw)))
+  return reader.emitError() << "failed to read {0}";
+if ({0}_raw > UINT32_MAX)
+  return reader.emitError() << "{0} value " << {0}_raw << " exceeds uint32_t range";
+{0} = static_cast<uint32_t>({0}_raw);
 )";
 
 /// {0}: Variable name.
-static const char *const deserializeInt64ArrayTemplate = R"(
-  SmallVector<int64_t, 4> {0};
-  if (failed(reader.readLEVarSize({0})))
-    return reader.emitError() << "failed to read {0}";
-)";
-static const char *const deserializeInt32ArrayTemplate = R"(
-  SmallVector<int32_t, 4> {0};
-  if (failed(reader.readLEVarSize({0})))
-    return reader.emitError() << "failed to read {0}";
-)";
-static const char *const deserializeDenseI32ArrayTemplate = R"(
-  SmallVector<int32_t, 4> {0}_data;
-  if (failed(reader.readLEVarSize({0}_data)))
-    return reader.emitError() << "failed to read {0} data";
-  auto {0} = DenseI32ArrayAttr::get(&context, {0}_data);
-)";
-static const char *const deserializeGenericTypeTemplate = R"(
-  Type {0} = readAndGetType(reader);
-  if (!{0})
-    return reader.emitError() << "failed to get {0} type";
+static const char *const readDenseI32ArrayTemplate = R"(
+SmallVector<int32_t, 4> {0}_data;
+if (failed(reader.readLEVarSize({0}_data)))
+ return reader.emitError() << "failed to read {0} data";
+{0} = DenseI32ArrayAttr::get(&context, {0}_data);
 )";
 
-/// {0}: Variable name, {1}: C++ type
-static const char *const deserializeSpecificTypeTemplate = R"(
-  Type {0}_generic = readAndGetType(reader);
-  if (!{0}_generic)
-    return reader.emitError() << "failed to get {0} type";
-  auto {0} = ::mlir::dyn_cast<{1}>({0}_generic);
-  if (!{0})
-    return reader.emitError() << "expected {1} but got " << {0}_generic;
+/// {0}: Variable name.
+static const char *const readGenericTypeTemplate = R"(
+{0} = readAndGetType(reader);
+if (!{0})
+  return reader.emitError() << "failed to get {0} type";
 )";
-static const char *const deserializeOptionalEnumTemplate = R"(
-  {1} {0};
+
+/// {0}: Variable name, {1}: C++ type.
+static const char *const readSpecificTypeTemplate = R"(
+Type {0}_generic = readAndGetType(reader);
+if (!{0}_generic)
+  return reader.emitError() << "failed to get {0} type";
+{0} = ::mlir::dyn_cast<{1}>({0}_generic);
+if (!{0})
+  return reader.emitError() << "expected {1} but got " << {0}_generic;
+)";
+/// Runtime template for OptionalEnum deserialization (includes both formats).
+/// {0}: Variable name, {1}: Runtime flag variable
+static const char *const readOptionalEnumTemplate = R"(
+if ({1}) {{
+  if (failed(parseGenericEnumAttr(reader, context, {0})))
+    return failure();
+} else {{
   if (reader.readLE<uint8_t>())
     if (failed(parseGenericEnumAttr(reader, context, {0})))
       return failure();
+}
 )";
 
 //===----------------------------------------------------------------------===//
@@ -117,25 +148,44 @@ static const char *const deserializeOptionalEnumTemplate = R"(
 //===----------------------------------------------------------------------===//
 
 /// Get parameters in serialization order.
-static auto getSerializationOrder(const CudaTileType &type) {
+static SmallVector<BytecodeTypeParameter, 4>
+getSerializationOrder(const CudaTileType &type) {
   if (type.needsReverseOrder)
-    return llvm::to_vector(llvm::reverse(type.parameters));
+    return llvm::to_vector<4>(llvm::reverse(type.parameters));
   return type.parameters;
 }
 
+/// Check if version string is >= 13.3 (unified bitfield format).
+/// Types introduced at 13.3+ always use unified format.
+static bool isUnifiedBitfieldVersion(StringRef version) {
+  auto [majorStr, minorStr] = parseVersion(version);
+  int major = std::stoi(majorStr);
+  int minor = std::stoi(minorStr);
+  return (major > 13) || (major == 13 && minor >= 3);
+}
+
+/// Replace TableGen placeholders with C++ code.
+static std::string replaceTableGenPlaceholders(StringRef code,
+                                               StringRef ctxtVar) {
+  FmtContext ctx;
+  ctx.addSubst("_ctxt", ctxtVar);
+  return tgfmt(code, &ctx);
+}
+
 /// Generate version check with proper indentation.
-static std::string generateVersionCheck(unsigned indent, StringRef version,
-                                        StringRef typeName) {
-  auto dotPos = version.find('.');
+static std::string
+generateVersionCheck(unsigned indent, StringRef version, StringRef typeName,
+                     StringRef versionVar = "config.bytecodeVersion",
+                     StringRef contextExpr = "type.getContext()",
+                     StringRef errorSuffix = "targeting ") {
+  auto [majorStr, minorStr] = parseVersion(version);
   std::string indentStr(indent, ' ');
-  return formatv("{0}auto requiredVersion = BytecodeVersion::fromVersion({1}, "
-                 "{2}, 0);\n"
-                 "{0}if (config.bytecodeVersion < *requiredVersion)\n"
-                 "{0}  return emitError(UnknownLoc::get(type.getContext()),\n"
-                 "{0}               \"type '{3}' requires bytecode version "
-                 "{4}+, targeting \") << config.bytecodeVersion.toString();\n",
-                 indentStr, version.substr(0, dotPos),
-                 version.substr(dotPos + 1), typeName, version)
+  return formatv("{0}if ({1} < *BytecodeVersion::fromVersion({2}, {3}, 0))\n"
+                 "{0}  return ::emitError(UnknownLoc::get({4}))\n"
+                 "{0}         << \"type '{5}' requires bytecode version {6}+, "
+                 "{7}\" << {1}.toString();\n",
+                 indentStr, versionVar, majorStr, minorStr, contextExpr,
+                 typeName, version, errorSuffix)
       .str();
 }
 
@@ -160,24 +210,36 @@ void mlir::tblgen::generateTypeTagEnum(const BytecodeTypeStructure &structure,
 //===----------------------------------------------------------------------===//
 
 static void generateParameterSerialization(const BytecodeTypeParameter &param,
-                                           raw_ostream &os) {
+                                           raw_ostream &os,
+                                           StringRef indent = "",
+                                           StringRef runtimeFlag = "") {
   std::string getterCall = "type." + param.accessorName + "()";
+  mlir::raw_indented_ostream ios(os);
 
   switch (param.kind) {
   case BytecodeTypeParameter::Kind::Int64Array:
   case BytecodeTypeParameter::Kind::Int32Array:
-    os << formatv(serializeArrayTemplate, getterCall);
+    ios.printReindented(formatv(serializeArrayTemplate, getterCall).str(),
+                        indent);
+    break;
+  case BytecodeTypeParameter::Kind::UInt32Scalar:
+    ios.printReindented(
+        formatv(serializeUInt32ScalarTemplate, getterCall).str(), indent);
     break;
   case BytecodeTypeParameter::Kind::DenseI32Array:
-    os << formatv(serializeDenseI32ArrayTemplate, getterCall);
+    ios.printReindented(
+        formatv(serializeDenseI32ArrayTemplate, getterCall).str(), indent);
     break;
   case BytecodeTypeParameter::Kind::GenericType:
   case BytecodeTypeParameter::Kind::SpecificType:
-    os << formatv(serializeTypeTemplate, getterCall);
+    ios.printReindented(formatv(serializeTypeTemplate, getterCall).str(),
+                        indent);
     break;
   case BytecodeTypeParameter::Kind::OptionalEnum:
-    os << formatv(serializeOptionalEnumTemplate, getterCall,
-                  param.enumTypeName);
+    ios.printReindented(formatv(serializeOptionalEnumTemplate, getterCall,
+                                param.enumTypeName, runtimeFlag)
+                            .str(),
+                        indent);
     break;
   default:
     llvm::PrintFatalError("Unsupported parameter kind in code generation");
@@ -189,25 +251,54 @@ static void generateParameterSerialization(const BytecodeTypeParameter &param,
 //===----------------------------------------------------------------------===//
 
 static void generateParameterDeserialization(const BytecodeTypeParameter &param,
-                                             raw_ostream &os) {
+                                             raw_ostream &os,
+                                             StringRef indent = "",
+                                             bool declareVariable = true,
+                                             StringRef runtimeFlag = "") {
+  mlir::raw_indented_ostream ios(os);
+
   switch (param.kind) {
   case BytecodeTypeParameter::Kind::Int64Array:
-    os << formatv(deserializeInt64ArrayTemplate, param.name);
+    if (declareVariable)
+      os << indent << formatv("SmallVector<int64_t, 4> {0};\n", param.name);
+    ios.printReindented(formatv(readArrayTemplate, param.name).str(), indent);
     break;
   case BytecodeTypeParameter::Kind::Int32Array:
-    os << formatv(deserializeInt32ArrayTemplate, param.name);
+    if (declareVariable)
+      os << indent << formatv("SmallVector<int32_t, 4> {0};\n", param.name);
+    ios.printReindented(formatv(readArrayTemplate, param.name).str(), indent);
+    break;
+  case BytecodeTypeParameter::Kind::UInt32Scalar:
+    if (declareVariable)
+      os << indent << formatv("uint32_t {0};\n", param.name);
+    ios.printReindented(formatv(readUInt32ScalarTemplate, param.name).str(),
+                        indent);
     break;
   case BytecodeTypeParameter::Kind::DenseI32Array:
-    os << formatv(deserializeDenseI32ArrayTemplate, param.name);
+    if (declareVariable)
+      os << indent << formatv("DenseI32ArrayAttr {0};\n", param.name);
+    ios.printReindented(formatv(readDenseI32ArrayTemplate, param.name).str(),
+                        indent);
     break;
   case BytecodeTypeParameter::Kind::GenericType:
-    os << formatv(deserializeGenericTypeTemplate, param.name);
+    if (declareVariable)
+      os << indent << formatv("Type {0};\n", param.name);
+    ios.printReindented(formatv(readGenericTypeTemplate, param.name).str(),
+                        indent);
     break;
   case BytecodeTypeParameter::Kind::SpecificType:
-    os << formatv(deserializeSpecificTypeTemplate, param.name, param.cppType);
+    if (declareVariable)
+      os << indent << formatv("{0} {1};\n", param.cppType, param.name);
+    ios.printReindented(
+        formatv(readSpecificTypeTemplate, param.name, param.cppType).str(),
+        indent);
     break;
   case BytecodeTypeParameter::Kind::OptionalEnum:
-    os << formatv(deserializeOptionalEnumTemplate, param.name, param.cppType);
+    if (declareVariable)
+      os << indent << formatv("{1} {0};\n", param.name, param.cppType);
+    ios.printReindented(
+        formatv(readOptionalEnumTemplate, param.name, runtimeFlag).str(),
+        indent);
     break;
   default:
     llvm::PrintFatalError("Unsupported parameter kind in code generation");
@@ -251,7 +342,116 @@ generateBuiltinTypeSerializers(const BytecodeTypeStructure &structure,
 }
 
 //===----------------------------------------------------------------------===//
+// C++ Generator - Optional Parameter Flags (Writer).
+//===----------------------------------------------------------------------===//
+//
+// Optional Parameter Handling:
+//
+// Types can have optional parameters (OptionalParameter<T>) that may be null.
+// These use a bitfield-based encoding for efficient serialization.
+//
+// Format Evolution:
+//   Version <13.3 (Legacy):
+//     - OptionalEnum: Uses inline flag byte per parameter
+//     - Optional Type: Not supported as it was added in later versions.
+//
+//   Version ≥13.3 (Unified Bitfield):
+//     - ALL optional params (Type, Enum, etc.): Single unified bitfield
+//     - No inline flags - bitfield indicates presence
+//
+// Bitfield Layout:
+//   - Bit 0: First optional param (in serialization order)
+//   - Bit N: Nth optional param
+//   - Bit set (1) = present, Bit clear (0) = null/absent
+//
+// Version Checking:
+//   Flags written if:
+//     1. config.bytecodeVersion >= firstOptionalParamVersion (type supports it)
+//     2. config.bytecodeVersion >= 13.3 (unified format exists)
+//   This allows targeting older versions for backward compatibility.
+//
+//===----------------------------------------------------------------------===//
+
+/// Generates flags field serialization for optional type parameters.
+static void generateOptionalParamFlags(const CudaTileType &type,
+                                       raw_ostream &os) {
+  if (!type.hasOptionalTypeParams)
+    return;
+
+  if (type.skipVersionCheck) {
+    os << R"(
+  bool useUnifiedBitfield = true;
+)";
+  } else {
+    os << R"(
+  bool useUnifiedBitfield = config.bytecodeVersion >= BytecodeVersion::kUnifiedBitfieldVersion;
+)";
+  }
+
+  os << R"(  uint64_t optionalFlags = 0;
+)";
+
+  // Build flags for all optional params.
+  unsigned bitIndex = 0;
+  for (const auto &param : getSerializationOrder(type)) {
+    if (param.usesOptionalTypeFlags) {
+      os << formatv(R"(  if (type.{0}()) optionalFlags |= (1ULL << {1});
+)",
+                    param.accessorName, bitIndex++);
+    }
+  }
+
+  // Write flags.
+  if (type.skipVersionCheck) {
+    os << "  writer.writeVarInt(optionalFlags);\n";
+  } else {
+    std::string minOptionalVersionStr = type.firstOptionalTypeParamVersion;
+    bool needsVersionCheck = !minOptionalVersionStr.empty() &&
+                             (minOptionalVersionStr != type.sinceVersion);
+    // Types >= 13.3 don't need runtime >= 13.3 check.
+    bool typeIsUnified = isUnifiedBitfieldVersion(type.sinceVersion);
+
+    if (needsVersionCheck) {
+      auto [majorStr, minorStr] = parseVersion(minOptionalVersionStr);
+      if (typeIsUnified) {
+        // Type >= 13.3: only check >= firstOptionalVersion.
+        os << formatv(R"(  
+  if (config.bytecodeVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0))
+    writer.writeVarInt(optionalFlags);
+)",
+                      majorStr, minorStr);
+      } else {
+        // Type < 13.3: check both versions.
+        os << formatv(R"(  
+  if (config.bytecodeVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0) &&
+      config.bytecodeVersion >= BytecodeVersion::kUnifiedBitfieldVersion)
+    writer.writeVarInt(optionalFlags);
+)",
+                      majorStr, minorStr);
+      }
+    } else {
+      if (typeIsUnified) {
+        // Type >= 13.3: no check needed.
+        os << "  writer.writeVarInt(optionalFlags);\n";
+      } else {
+        // Type < 13.3: check >= 13.3.
+        os << R"(  
+  if (config.bytecodeVersion >= BytecodeVersion::kUnifiedBitfieldVersion)
+    writer.writeVarInt(optionalFlags);
+)";
+      }
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // C++ Generator - Type Serializers.
+//===----------------------------------------------------------------------===//
+//
+// Generates serialization function for each CudaTile type.
+// For types with optional parameters, uses unified bitfield (13.3+) or
+// legacy inline flags (<13.3). See "Optional Parameter Flags" section above.
+//
 //===----------------------------------------------------------------------===//
 
 static void generateCudaTileTypeSerializer(const CudaTileType &type,
@@ -260,13 +460,62 @@ static void generateCudaTileTypeSerializer(const CudaTileType &type,
   os << formatv(cudaTileSerializerSignatureTemplate, type.typeName,
                 type.qualifiedTypeName);
 
-  // Version checking.
-  os << generateVersionCheck(2, type.sinceVersion, type.typeName);
+  if (!type.skipVersionCheck)
+    os << generateVersionCheck(2, type.sinceVersion, type.typeName);
+
   // Write type tag.
   os << "  writer.writeVarInt(Bytecode::TypeTag::" << type.typeName << ");\n";
-  // Serialize parameters.
-  for (const auto &param : getSerializationOrder(type))
-    generateParameterSerialization(param, os);
+
+  // Declare format flag and write flags only if type has optional params.
+  generateOptionalParamFlags(type, os);
+
+  // Serialize parameters conditionally based on target bytecode version.
+  for (const auto &param : getSerializationOrder(type)) {
+    bool isEvolved =
+        !type.skipVersionCheck && param.sinceVersion != type.sinceVersion;
+
+    // Original parameters - always serialize.
+    if (!isEvolved) {
+      generateParameterSerialization(param, os, "  ", "useUnifiedBitfield");
+      continue;
+    }
+
+    // Evolved parameters - version-guarded with validation.
+    auto [majorStr, minorStr] = parseVersion(param.sinceVersion);
+    std::string getterCall = "type." + param.accessorName + "()";
+    std::string defaultValue =
+        replaceTableGenPlaceholders(param.defaultValue, "type.getContext()");
+
+    // Validate: null check for optional, equality for non-optional.
+    std::string validationCheck =
+        param.usesOptionalTypeFlags
+            ? formatv("if ({0})", getterCall).str()
+            : formatv("if ({0} != {1})", getterCall, defaultValue).str();
+
+    os << formatv(R"(
+  if (config.bytecodeVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0)) {{
+)",
+                  majorStr, minorStr);
+
+    // Serialize parameter.
+    if (param.usesOptionalTypeFlags) {
+      os << formatv("    if ({0}) {{\n", getterCall);
+      generateParameterSerialization(param, os, "      ", "useUnifiedBitfield");
+      os << "    }\n";
+    } else {
+      generateParameterSerialization(param, os, "    ", "useUnifiedBitfield");
+    }
+
+    os << formatv(R"(  } else {{
+      // Validate: parameter must be null/equal default when targeting older version.
+      {0}
+      return emitError(UnknownLoc::get(type.getContext()),
+                   "parameter '{1}' requires bytecode version {2}+, but targeting ") << config.bytecodeVersion.toString();
+  }
+)",
+                  validationCheck, param.name, param.sinceVersion);
+  }
+
   os << "  return success();\n}\n\n";
 }
 
@@ -294,12 +543,18 @@ generateBuiltinTypeDeserializers(const BytecodeTypeStructure &structure,
             ? formatv("IntegerType::get(&context, {0})", bt.integerBitWidth)
                   .str()
             : formatv("{0}::get(&context)", bt.floatMlirTypeName).str();
+
+    // Generate version check.
+    std::string versionCheck =
+        generateVersionCheck(4, bt.sinceVersion, bt.enumName, "fileVersion",
+                             "&context", "file version is ");
+
     std::string check = formatv(R"(
-  if (typeTag == {0}) {{  
-    result = {1};
+  if (typeTag == {0}) {{
+{1}    result = {2};
     return success();
   })",
-                                bt.typeTagValue, typeCreation)
+                                bt.typeTagValue, versionCheck, typeCreation)
                             .str();
 
     if (bt.isInteger())
@@ -310,7 +565,8 @@ generateBuiltinTypeDeserializers(const BytecodeTypeStructure &structure,
 
   if (!intChecks.empty())
     os << formatv(R"(// Auto-generated integer type deserialization
-LogicalResult parseIntegerType(uint8_t typeTag, Type &result, MLIRContext &context) {{
+LogicalResult parseIntegerType(uint8_t typeTag, Type &result, MLIRContext &context,
+                               const BytecodeVersion &fileVersion) {{
 {0}  
   return ::emitError(UnknownLoc::get(&context)) << "invalid integer type tag: " << static_cast<int>(typeTag);
 })",
@@ -318,7 +574,8 @@ LogicalResult parseIntegerType(uint8_t typeTag, Type &result, MLIRContext &conte
 
   if (!floatChecks.empty())
     os << formatv(R"(// Auto-generated float type deserialization
-LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context) {{
+LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context,
+                             const BytecodeVersion &fileVersion) {{
 {0}  
   return ::emitError(UnknownLoc::get(&context)) << "unsupported float type tag: " << static_cast<int>(typeTag);
 })",
@@ -326,7 +583,74 @@ LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context
 }
 
 //===----------------------------------------------------------------------===//
+// C++ Generator - Optional Parameter Flags (Reader).
+//===----------------------------------------------------------------------===//
+//
+// Reads the optional parameter bitfield written by the writer.
+// See "Optional Parameter Flags (Writer)" section above for format details.
+//
+// Reading Strategy:
+//   - Determine format from fileVersion (≥13.3 = unified, <13.3 = legacy)
+//   - Read bitfield if: fileVersion >= firstOptionalParamVersion && unified
+//   - For legacy format: OptionalEnum uses inline flags (read by templates)
+//
+//===----------------------------------------------------------------------===//
+
+/// Generates flags field deserialization for optional type parameters.
+static void generateOptionalParamFlagsReader(const CudaTileType &type,
+                                             raw_ostream &os) {
+  if (!type.hasOptionalTypeParams)
+    return;
+
+  if (type.skipVersionCheck) {
+    os << R"(
+  bool useUnifiedBitfield = true;
+  uint64_t optionalFlags = 0;
+  if (failed(reader.readVarInt(optionalFlags)))
+    return reader.emitError() << "failed to read optional parameter flags";
+)";
+  } else {
+    // Types >= 13.3 don't need runtime >= 13.3 check.
+    bool typeIsUnified = isUnifiedBitfieldVersion(type.sinceVersion);
+    std::string minOptionalVersionStr = type.firstOptionalTypeParamVersion;
+    auto [majorStr, minorStr] = parseVersion(minOptionalVersionStr);
+
+    if (typeIsUnified) {
+      // Type >= 13.3: useUnifiedBitfield is always true.
+      os << formatv(R"(
+  bool useUnifiedBitfield = true;
+  uint64_t optionalFlags = 0;
+  if (fileVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0)) {{
+    if (failed(reader.readVarInt(optionalFlags)))
+      return reader.emitError() << "failed to read optional parameter flags";
+  }
+)",
+                    majorStr, minorStr);
+    } else {
+      // Type < 13.3: need runtime check for unified format.
+      os << R"(
+  bool useUnifiedBitfield = fileVersion >= BytecodeVersion::kUnifiedBitfieldVersion;
+)";
+      os << formatv(R"(
+  uint64_t optionalFlags = 0;
+  if (fileVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0) && useUnifiedBitfield) {{
+    if (failed(reader.readVarInt(optionalFlags)))
+      return reader.emitError() << "failed to read optional parameter flags";
+  }
+)",
+                    majorStr, minorStr);
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // C++ Generator - Type Deserializers.
+//===----------------------------------------------------------------------===//
+//
+// Generates deserialization function for each CudaTile type.
+// Reads optional parameter bitfield (13.3+) or inline flags (<13.3).
+// See "Optional Parameter Flags" sections above for format details.
+//
 //===----------------------------------------------------------------------===//
 
 static void generateCudaTileTypeDeserializer(const CudaTileType &type,
@@ -336,9 +660,68 @@ LogicalResult parse{0}(EncodingReader &reader, Type &result) {{
 )",
                 type.typeName);
 
-  // Deserialize parameters.
-  for (const auto &param : getSerializationOrder(type))
-    generateParameterDeserialization(param, os);
+  // Version check for the type itself.
+  if (!type.skipVersionCheck)
+    os << generateVersionCheck(2, type.sinceVersion, type.typeName,
+                               "fileVersion", "&context", "file version is ");
+
+  // Declare format flag and read flags only if type has optional params.
+  generateOptionalParamFlagsReader(type, os);
+
+  // Deserialize parameters conditionally based on file bytecode version.
+  unsigned optionalBitIndex = 0;
+  for (const auto &param : getSerializationOrder(type)) {
+    bool isEvolved =
+        !type.skipVersionCheck && param.sinceVersion != type.sinceVersion;
+
+    // Original parameters - always deserialize.
+    if (!isEvolved) {
+      // Optional params: template chooses format based on useUnifiedBitfield.
+      if (param.usesOptionalTypeFlags) {
+        os << formatv(R"(  {0} {1};
+  if (!useUnifiedBitfield || (optionalFlags & (1ULL << {2}))) {{
+)",
+                      param.cppType, param.name, optionalBitIndex++);
+        generateParameterDeserialization(
+            param, os, "    ", /*declareVariable=*/false, "useUnifiedBitfield");
+        os << R"(  }
+)";
+      } else {
+        generateParameterDeserialization(
+            param, os, "  ", /*declareVariable=*/true, "useUnifiedBitfield");
+      }
+      continue;
+    }
+
+    // Evolved parameters - version-guarded deserialization.
+    auto [majorStr, minorStr] = parseVersion(param.sinceVersion);
+    std::string defaultValue =
+        replaceTableGenPlaceholders(param.defaultValue, "&context");
+
+    // Optional params: conditionally read based on flag bit (template handles
+    // runtime format).
+    if (param.usesOptionalTypeFlags) {
+      os << formatv(R"(  {0} {1};
+  if (optionalFlags & (1ULL << {2})) {{
+)",
+                    param.cppType, param.name, optionalBitIndex++);
+      generateParameterDeserialization(
+          param, os, "    ", /*declareVariable=*/false, "useUnifiedBitfield");
+      os << "  }\n";
+      continue;
+    }
+
+    // Non-optional params: initialize with default, conditionally override.
+    os << formatv("  {0} {1} = {2};\n", param.cppType, param.name,
+                  defaultValue);
+    os << formatv(R"(
+  if (fileVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0)) {{
+)",
+                  majorStr, minorStr);
+    generateParameterDeserialization(
+        param, os, "    ", /*declareVariable=*/false, "useUnifiedBitfield");
+    os << "  }\n";
+  }
 
   // Build constructor arguments.
   std::string args;
@@ -352,11 +735,11 @@ LogicalResult parse{0}(EncodingReader &reader, Type &result) {{
       args += ", " + param.name;
   }
 
-  os << formatv(R"(  result = {0}::getChecked(
+  os << formatv(R"(  
+  result = {0}::getChecked(
       [&]() {{ return reader.emitError(); }, &context{1});
   return success(result);
 }
-
 )",
                 type.qualifiedTypeName, args);
 }
@@ -414,6 +797,31 @@ void mlir::tblgen::generateSerializerDispatch(
 )";
 }
 
+void mlir::tblgen::generateDependentTypeRegistration(
+    const BytecodeTypeStructure &structure, raw_ostream &os) {
+  emitSourceFileHeader("Generated Dependent Type Registration", os);
+
+  for (const auto &type : structure.cudaTileTypes) {
+    // Check if type has Type parameters that need registration.
+    if (!llvm::any_of(type.parameters, [](const BytecodeTypeParameter &p) {
+          return isTypeParameter(p.kind);
+        }))
+      continue;
+
+    // Generate registration for this type.
+    os << formatv("if (auto concreteType = dyn_cast<{0}>(type)) {{\n",
+                  type.qualifiedTypeName);
+    for (const auto &param : type.parameters)
+      if (isTypeParameter(param.kind))
+        os << formatv(R"(  if (auto paramType = concreteType.{0}())
+    getTypeIndex(paramType);
+)",
+                      param.accessorName);
+
+    os << "  return;\n}\n";
+  }
+}
+
 void mlir::tblgen::generateDeserializerDispatch(
     const BytecodeTypeStructure &structure, raw_ostream &os) {
   emitSourceFileHeader("Generated Type Deserialization Dispatch", os);
@@ -425,9 +833,10 @@ void mlir::tblgen::generateDeserializerDispatch(
   for (const auto &builtinType : structure.builtinSerializableTypes) {
     os << "case Bytecode::TypeTag::" << builtinType.enumName << ":\n";
     if (builtinType.isInteger())
-      os << "  return parseIntegerType(typeTag, result, context);\n";
+      os << "  return parseIntegerType(typeTag, result, context, "
+            "fileVersion);\n";
     else if (builtinType.isFloat())
-      os << "  return parseFloatType(typeTag, result, context);\n";
+      os << "  return parseFloatType(typeTag, result, context, fileVersion);\n";
   }
 
   // CudaTile types.

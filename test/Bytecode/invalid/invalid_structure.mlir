@@ -11,7 +11,7 @@
 // Version
 //===--------------------------------------------------------------------===//
 // RUN: not cuda-tile-translate -cudatilebc-to-mlir %S/unsupported_version.tileirbc -no-implicit-module 2>&1 | FileCheck %s --check-prefix=VERSION
-// VERSION: unsupported Tile version 18.0.0, this reader supports versions [13.1, 13.2]
+// VERSION: unsupported Tile version 18.0.0, this reader supports versions [13.1 - 13.3]
 
 //===--------------------------------------------------------------------===//
 // Section ID

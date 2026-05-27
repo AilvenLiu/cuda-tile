@@ -1,4 +1,4 @@
-//===- SpecGen.cpp ----------------------------------------------*- C++ -*-===//
+//===- SpecGen.cpp - MLIR operation documentation generator -----*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -7,8 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// OpDocGen uses the description of operations to generate documentation for the
-// operations.
+// Uses the description of operations to generate documentation.
 //
 //===----------------------------------------------------------------------===//
 
@@ -100,6 +99,90 @@ getRequestedOpDefinitions(const RecordKeeper &records) {
   }
 
   return defs;
+}
+
+static FormattedExample processExample(const std::string &example) {
+  std::vector<std::tuple<int, int>> lineRanges;
+  std::stringstream exampleReindented;
+  int reindent = INT_MAX;
+  int dedent = INT_MAX;
+
+  std::vector<std::string> lines;
+  std::string line;
+  std::istringstream stream(example);
+
+  int lineNumber = 1;
+  while (std::getline(stream, line)) {
+    // Find first non-whitespace character
+    size_t firstNonWhitespace = line.find_first_not_of(" \t");
+    if (firstNonWhitespace != std::string::npos) {
+      // If line starts with #, update reindent if needed
+      int leadingSpaces = firstNonWhitespace;
+      if (line[firstNonWhitespace] == '#') {
+        size_t firstNonWSAfterHash =
+            line.find_first_not_of(" \t", firstNonWhitespace + 1);
+        // We want to remove the leading # and the leading spaces but preserve
+        // the rest of the whitespace as we want normalize the whitespace.
+        std::string lineWithoutHash = line.substr(0, firstNonWhitespace) +
+                                      line.substr(firstNonWhitespace + 1);
+        lines.push_back(lineWithoutHash);
+        leadingSpaces = firstNonWSAfterHash - 1;
+      } else {
+        lines.push_back(line);
+        lineRanges.emplace_back(lineNumber, lineNumber);
+        dedent = std::min(dedent, leadingSpaces);
+      }
+      // Compute how must to reindent the line by.
+      reindent = std::min(reindent, leadingSpaces);
+    } else {
+      lines.push_back("");
+      lineRanges.emplace_back(lineNumber, lineNumber);
+    }
+    lineNumber++;
+  }
+
+  // If there was no leading indentation we don't want to reindent
+  // we used INT_MAX as a sentinel value.
+  reindent = std::max(0, reindent);
+  // We want to dedent the lines by the max of the visible lines's leading
+  // whitespace.
+  //
+  // For example if we display the body of a function we will reindent
+  // correctly but when we render the lines they will all have the same
+  // leading whitespace.
+  dedent = std::max(0, dedent);
+  dedent -= reindent;
+
+  // Before we tracked only one line spans (i.e., 1-1, 2-2)
+  // this compresses continous spans (i.e., 1-2) to reduce the generated
+  // noise.
+  std::vector<std::tuple<int, int>> compressedLineRanges;
+  int startRange = 1;
+  int endRange = 0;
+  for (const auto &lineRange : lineRanges) {
+    if (std::get<0>(lineRange) == endRange + 1) {
+      endRange++;
+    } else {
+      compressedLineRanges.emplace_back(startRange, endRange);
+      startRange = std::get<0>(lineRange);
+      endRange = std::get<1>(lineRange);
+    }
+  }
+
+  // Make sure to add the last range in case the last range
+  // has no breaks.
+  compressedLineRanges.emplace_back(startRange, endRange);
+
+  for (const auto &line : lines) {
+    if (!line.empty()) {
+      // std::cout << "line: " << line << std::endl;
+      exampleReindented << line.substr(reindent) << std::endl;
+    } else {
+      exampleReindented << std::endl;
+    }
+  }
+
+  return {compressedLineRanges, exampleReindented.str(), dedent};
 }
 
 void emitSummary(StringRef summary, raw_ostream &os) {
@@ -322,11 +405,15 @@ static void emitAttributeDef(SpecEmitter &emitter,
   emitter.emitAnchor(attrDef.getAnchor());
   std::cout << "prefixDescription: " << attrDef.prefixDescription << "\n";
   emitter.emitDescription(attrDef.prefixDescription);
-  for (auto &example : attrDef.examples) {
-    // TODO: emit the examples to disk as well so we can check them.
-    emitter.emitCodeBlock([&](raw_ostream &os) { os << example; },
-                          CodeBlockOptions{"mlir"});
+  int i = 0;
+  for (auto &exampleText : attrDef.examples) {
+    auto processedExample = processExample(exampleText);
+    auto exampleName =
+        attrDef.opName + "_example_" + attrDef.name + "_" + std::to_string(i);
+    emitter.emitExample(exampleName, processedExample);
+    i++;
   }
+  emitter.os << "\n\n";
 }
 
 static void
@@ -426,113 +513,11 @@ static void emitOperationSignature(SpecEmitter &emitter,
   emitter.os << "\n\n";
 }
 
-struct ProcessedExample {
-  std::vector<std::tuple<int, int>> lineRanges;
-  std::string exampleReindented;
-  int dedent;
-};
-
-static ProcessedExample processExample(const std::string &example) {
-  std::vector<std::tuple<int, int>> lineRanges;
-  std::stringstream exampleReindented;
-  int reindent = INT_MAX;
-  int dedent = INT_MAX;
-
-  std::vector<std::string> lines;
-  std::string line;
-  std::istringstream stream(example);
-
-  int lineNumber = 1;
-  while (std::getline(stream, line)) {
-    // Find first non-whitespace character
-    size_t firstNonWhitespace = line.find_first_not_of(" \t");
-    if (firstNonWhitespace != std::string::npos) {
-      // If line starts with #, update reindent if needed
-      int leadingSpaces = firstNonWhitespace;
-      if (line[firstNonWhitespace] == '#') {
-        size_t firstNonWSAfterHash =
-            line.find_first_not_of(" \t", firstNonWhitespace + 1);
-        // We want to remove the leading # and the leading spaces but preserve
-        // the rest of the whitespace as we want normalize the whitespace.
-        std::string lineWithoutHash = line.substr(0, firstNonWhitespace) +
-                                      line.substr(firstNonWhitespace + 1);
-        lines.push_back(lineWithoutHash);
-        leadingSpaces = firstNonWSAfterHash - 1;
-      } else {
-        lines.push_back(line);
-        lineRanges.emplace_back(lineNumber, lineNumber);
-        dedent = std::min(dedent, leadingSpaces);
-      }
-      // Compute how must to reindent the line by.
-      reindent = std::min(reindent, leadingSpaces);
-    } else {
-      lines.push_back("");
-      lineRanges.emplace_back(lineNumber, lineNumber);
-    }
-    lineNumber++;
-  }
-
-  // If there was no leading indentation we don't want to reindent
-  // we used INT_MAX as a sentinel value.
-  reindent = std::max(0, reindent);
-  // We want to dedent the lines by the max of the visible lines's leading
-  // whitespace.
-  //
-  // For example if we display the body of a function we will reindent
-  // correctly but when we render the lines they will all have the same
-  // leading whitespace.
-  dedent = std::max(0, dedent);
-  dedent -= reindent;
-
-  // Before we tracked only one line spans (i.e., 1-1, 2-2)
-  // this compresses continous spans (i.e., 1-2) to reduce the generated
-  // noise.
-  std::vector<std::tuple<int, int>> compressedLineRanges;
-  int startRange = 1;
-  int endRange = 0;
-  for (const auto &lineRange : lineRanges) {
-    if (std::get<0>(lineRange) == endRange + 1) {
-      endRange++;
-    } else {
-      compressedLineRanges.emplace_back(startRange, endRange);
-      startRange = std::get<0>(lineRange);
-      endRange = std::get<1>(lineRange);
-    }
-  }
-
-  // Make sure to add the last range in case the last range
-  // has no breaks.
-  compressedLineRanges.emplace_back(startRange, endRange);
-
-  for (const auto &line : lines) {
-    if (!line.empty()) {
-      // std::cout << "line: " << line << std::endl;
-      exampleReindented << line.substr(reindent) << std::endl;
-    } else {
-      exampleReindented << std::endl;
-    }
-  }
-
-  return {compressedLineRanges, exampleReindented.str(), dedent};
-}
-
 static void emitOperationExample(SpecEmitter &emitter,
                                  const std::string &exampleName,
                                  const std::string &example) {
   auto processedExample = processExample(example);
-  std::string exampleFileName = "example_" + exampleName + ".mlir";
-  std::string exampleAnchor = "example_" + exampleName;
-  auto exampleFilePath = "/_spec_gen/examples/" + exampleFileName;
-
-  emitter.emitExample(exampleName, exampleAnchor, exampleFileName,
-                      processedExample.exampleReindented);
-  emitter.emitLiteralInclude(exampleFilePath, exampleAnchor,
-                             processedExample.lineRanges, "mlir",
-                             {processedExample.dedent});
-
-  // Investigate whether we can attach this as caption text to the example.
-  emitter.os << "See :ref:`" << exampleAnchor
-             << "` for the full example listing.\n\n";
+  emitter.emitExample(exampleName, processedExample);
 }
 
 // Emit documentation for an operation of the rough form:
@@ -647,8 +632,9 @@ static void emitOpDoc(SpecEmitter &emitter, CudaTileOp &cudaTileOp,
 
 // These are the declared sections.
 static const char *const cudaTileSections[] = {
-    "Core",         "Conversions", "Control Flow", "Memory", "Floating Point",
-    "Integer",      "Bitwise",     "Atomics",      "Views",  "Miscellaneous",
+    "Core",           "Conversions",   "Control Flow", "Memory",
+    "Floating Point", "Integer",       "Bitwise",      "Atomics",
+    "Views",          "Miscellaneous", "Testing",
 };
 
 static const int NUMBER_SECTIONS =
@@ -728,6 +714,11 @@ void cudatile::tblgen::generateSpec(
     // The second is a lit of the records corresponding to the operations in the
     // section/group.
     auto groupOps = pair.second;
+
+    // Skip documenting any testing operations.
+    if (cudaTileGroupLabel == "Testing") {
+      continue;
+    }
 
     // An anchor declares a thing that can be references elsewhere in the
     // document.

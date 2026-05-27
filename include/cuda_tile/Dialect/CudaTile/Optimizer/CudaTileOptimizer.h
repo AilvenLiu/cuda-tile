@@ -120,8 +120,8 @@ struct TileIROptimizerConfig {
   bool verbose = false;
 };
 
-/// Optimize a CUDA Tile IR bytecode buffer and re-emit bytecode according to
-/// options. On success(), writes to file and/or memory per `opts.outputMode`.
+/// Optimize a CUDA Tile IR bytecode buffer and re-emit bytecode according to options.
+/// On success(), writes to file and/or memory per `opts.outputMode`.
 mlir::LogicalResult optimizeTileIR(TileIROptimizerConfig &cfg);
 
 } // namespace mlir::cuda_tile

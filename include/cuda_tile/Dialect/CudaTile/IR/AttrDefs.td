@@ -15,13 +15,36 @@ include "mlir/IR/EnumAttr.td"
 include "cuda_tile/Dialect/CudaTile/IR/Dialect.td"
 include "cuda_tile/Dialect/CudaTile/IR/Interfaces.td"
 
+#ifdef TILE_IR_INCLUDE_TESTS
+include "cuda_tile/Dialect/CudaTile/IR/TestingAttrs.td"
+#endif // TILE_IR_INCLUDE_TESTS
+
+//===----------------------------------------------------------------------===//
+// MLIR Builtin Attribute Aliases with Version Information
+// These define version information for MLIR builtin attrs used in bytecode.
+//===----------------------------------------------------------------------===//
+
+class CudaTileAttrAlias<string name, string version> {
+  string attrName = name;
+  string sinceVersion = version;
+}
+
+def CudaTile_IntegerAttr : CudaTileAttrAlias<"Integer", "13.1">;
+def CudaTile_FloatAttr : CudaTileAttrAlias<"Float", "13.1">;
+def CudaTile_BoolAttr : CudaTileAttrAlias<"Bool", "13.1">;
+def CudaTile_TypeAttr : CudaTileAttrAlias<"Type", "13.1">;
+def CudaTile_StringAttr : CudaTileAttrAlias<"String", "13.1">;
+def CudaTile_ArrayAttr : CudaTileAttrAlias<"Array", "13.1">;
+def CudaTile_DenseElementsAttr : CudaTileAttrAlias<"DenseElements", "13.1">;
+def CudaTile_DictionaryAttr : CudaTileAttrAlias<"Dictionary", "13.1">;
+
 //===----------------------------------------------------------------------===//
 // Integer Signedness Attribute
 //===----------------------------------------------------------------------===//
 
-def CudaTile_Signedness : CudaTileI32EnumAttr<"Signedness", "signedness",
-    [CudaTileI32EnumAttrCase<"Treat the operands as unsigned integers.", "Unsigned", 0, "unsigned">,
-     CudaTileI32EnumAttrCase<"Treat the operands as signed integers.", "Signed", 1, "signed">]> {
+def CudaTile_Signedness : CudaTileI32EnumAttr<"Signedness", "signedness", "13.1",
+    [CudaTileI32EnumAttrCase<"Treat the operands as unsigned integers.", "Unsigned", 0, "13.1", "unsigned">,
+     CudaTileI32EnumAttrCase<"Treat the operands as signed integers.", "Signed", 1, "13.1", "signed">]> {
   let specPrefixDescription = "The :code:`signedness` attribute specifies the signedness of operand(s).";
   let specSuffixDescription = "";
   let genSpecializedAttr = 0;
@@ -38,12 +61,12 @@ def CudaTile_SignednessAttr : CudaTileEnumAttr<CudaTile_Signedness, "signedness"
 //===----------------------------------------------------------------------===//
 
 def CudaTile_IntegerOverflow : CudaTileI32EnumAttr<
-  "IntegerOverflow", "integer overflow",
+  "IntegerOverflow", "integer overflow", "13.1",
   [
-      CudaTileI32EnumAttrCase<"The compiler makes no assumptions regarding overflow behavior.", "NONE", 0, "none">,
-      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands signed integers.", "NSW", 1, "no_signed_wrap">,
-      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands unsigned integers.", "NUW", 2, "no_unsigned_wrap">,
-      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands as signed or unsigned integers.", "NW", 3, "no_wrap">,
+      CudaTileI32EnumAttrCase<"The compiler makes no assumptions regarding overflow behavior.", "NONE", 0, "13.1", "none">,
+      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands signed integers.", "NSW", 1, "13.1", "no_signed_wrap">,
+      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands unsigned integers.", "NUW", 2, "13.1", "no_unsigned_wrap">,
+      CudaTileI32EnumAttrCase<"The compiler assumes that overflow (wrap-around) will not occur when interpreting the operands as signed or unsigned integers.", "NW", 3, "13.1", "no_wrap">,
   ]> {
   let specPrefixDescription = [{
     The :code:`overflow` attribute is used to instruct the compiler on how to reason about the overflow behavior of the specific operation.
@@ -67,7 +90,7 @@ def CudaTile_IntegerOverflowAttr :
 // Optimization hints Attributes
 //===----------------------------------------------------------------------===//
 
-def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optimization_hints"> {
+def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optimization_hints", "13.1"> {
   let parameters = (ins "DictionaryAttr":$value);
   let description = [{
     The :code:`optimization_hints` attribute provides architecture-specific compiler hints in the form of nested dictionaries.
@@ -76,16 +99,20 @@ def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optim
     specific hints for each operation.
 
     - :code:`num_cta_in_cga` - suggest the number of CTAs in a CGA (which must be the power of 2 less than or equal to 16) for :ref:`op-cuda_tile.entry`.
+    - :code:`num_worker_warps_per_cta` - suggest the number of worker warps per CTA (which only support [4, 8] currently) for :ref:`op-cuda_tile.entry`.
     - :code:`allow_tma` - suggest whether to use TMA for :ref:`op-cuda_tile.load_view_tko` and :ref:`op-cuda_tile.store_view_tko`.
     - :code:`latency` - latency hint for :ref:`op-cuda_tile.load_view_tko` and :ref:`op-cuda_tile.store_view_tko`.
+
+    User can specify :code:`default` hint that will be used when no target-specific hint is provided
+    (and only when :code:`default` hint value is in the valid range for the current compilation target).
 
     For example they can be annotated as:
 
     .. code-block:: mlir
 
       optimization_hints=<
-        sm_100 = {num_cta_in_cga = 8},
-        sm_120 = {num_cta_in_cga = 16}
+        sm_100 = {num_cta_in_cga = 8, num_worker_warps_per_cta = 8},
+        sm_120 = {num_cta_in_cga = 16, num_worker_warps_per_cta = 4}
       >
   }];
 
@@ -94,7 +121,8 @@ def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optim
       [TableHeader<"Optimization Hint", "code">, TableHeader<"EntryOp">,
        TableHeader<"LoadViewTkoOp, StoreViewTkoOp">,
        TableHeader<"LoadPtrTkoOp, StorePtrTkoOp">],
-      [TableRow<["num_cta_in_cga", "yes", "no", "no"]>,
+      [       TableRow<["num_cta_in_cga", "yes", "no", "no"]>,
+       TableRow<["num_worker_warps_per_cta", "yes", "no", "no"]>,
        TableRow<["allow_tma", "no", "yes", "no"]>,
        TableRow<["latency", "no", "yes", "yes"]>]
     >
@@ -106,7 +134,33 @@ def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optim
   let extraClassDeclaration = [{
 
   private:
+    static constexpr llvm::StringLiteral kDefault = "default";
+    static constexpr llvm::StringLiteral knownKeysArr[] = {
+        "sm_80",
+        "sm_86",
+        "sm_87", 
+        "sm_88", 
+        "sm_89", 
+        "sm_90", 
+        "sm_100", 
+        "sm_103",
+        "sm_110", 
+        "sm_120", 
+        "sm_121", 
+        kDefault};
+    
+    static bool isKnownKey(llvm::StringRef key) {
+      return llvm::is_contained(knownKeysArr, key);
+    }
+
+    mlir::LogicalResult verifyParamWithContext(Location loc,
+                                               llvm::StringRef context,
+                                               ArrayRef<StringRef> keysValidForOperation,
+                                               DictionaryAttr &attr);
+    std::optional<Attribute> getAttributeForSmOrDefault(DictionaryAttr value, StringRef sm, StringRef key);
+  public:
     static constexpr llvm::StringLiteral kNumCTAInCGA = "num_cta_in_cga";
+    static constexpr llvm::StringLiteral kNumWorkerWarpsPerCTA = "num_worker_warps_per_cta";
     static constexpr llvm::StringLiteral kAllowTMA = "allow_tma";
     static constexpr llvm::StringLiteral kLatency = "latency";
     static constexpr llvm::StringLiteral kOccupancy = "occupancy";
@@ -123,10 +177,11 @@ def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optim
                                                DictionaryAttr &attr);
   public:
     std::optional<int> getNumCTAInCGA(StringRef sm);
+    std::optional<int> getNumWorkerWarpsPerCTA(StringRef sm);
     std::optional<bool> getAllowTMA(StringRef sm);
     std::optional<int> getLatency(StringRef sm);
     std::optional<int> getOccupancy(StringRef sm);
-    static mlir::LogicalResult verifyWithOp(Operation *op, llvm::function_ref<InFlightDiagnostic()> emitError, DictionaryAttr value);
+    mlir::LogicalResult verifyWithOp(Operation *op, DictionaryAttr value);
 
   }];
 }
@@ -136,16 +191,16 @@ def CudaTile_OptimizationHintsAttr : CudaTileAttrDef<"OptimizationHints", "optim
 //===----------------------------------------------------------------------===//
 
 def CudaTile_RoundingMode : CudaTileI32EnumAttr<
-  "RoundingMode", "rounding mode",
-  [   CudaTileI32EnumAttrCase<"Round to nearest (ties to even).", "NEAREST_EVEN", 0, "nearest_even">,
-      CudaTileI32EnumAttrCase<"Round towards zero (truncate).", "ZERO", 1, "zero">,
-      CudaTileI32EnumAttrCase<"Round towards negative infinity.", "NEGATIVE_INF", 2, "negative_inf">,
-      CudaTileI32EnumAttrCase<"Round towards positive infinity.", "POSITIVE_INF", 3, "positive_inf">,
-      CudaTileI32EnumAttrCase<"Approximate rounding mode.", "APPROX", 4, "approx">,
-      CudaTileI32EnumAttrCase<"Full precision rounding mode.", "FULL", 5, "full">,
+  "RoundingMode", "rounding mode", "13.1",
+  [   CudaTileI32EnumAttrCase<"Round to nearest (ties to even).", "NEAREST_EVEN", 0, "13.1", "nearest_even">,
+      CudaTileI32EnumAttrCase<"Round towards zero (truncate).", "ZERO", 1, "13.1", "zero">,
+      CudaTileI32EnumAttrCase<"Round towards negative infinity.", "NEGATIVE_INF", 2, "13.1", "negative_inf">,
+      CudaTileI32EnumAttrCase<"Round towards positive infinity.", "POSITIVE_INF", 3, "13.1", "positive_inf">,
+      CudaTileI32EnumAttrCase<"Approximate rounding mode.", "APPROX", 4, "13.1", "approx">,
+      CudaTileI32EnumAttrCase<"Full precision rounding mode.", "FULL", 5, "13.1", "full">,
 
       // Integer roundings
-      CudaTileI32EnumAttrCase<"Round towards zero to the nearest integer.", "NEAREST_INT_TO_ZERO", 6, "nearest_int_to_zero">
+      CudaTileI32EnumAttrCase<"Round towards zero to the nearest integer.", "NEAREST_INT_TO_ZERO", 6, "13.1", "nearest_int_to_zero">
   ]> {
   let specPrefixDescription = "The :code:`rounding` attribute specifies the rounding mode to use for the operation.";
   let specSuffixDescription = "";
@@ -164,9 +219,9 @@ def CudaTile_RoundingModeAttr : CudaTileEnumAttr<CudaTile_RoundingMode, "roundin
 // Comparison Attributes
 //===----------------------------------------------------------------------===//
 
-def CudaTile_ComparisonOrdering : CudaTileI32EnumAttr<"ComparisonOrdering", "comparison_ordering",
-    [CudaTileI32EnumAttrCase<"Unordered comparison.", "UNORDERED", 0, "unordered">,
-     CudaTileI32EnumAttrCase<"Ordered comparison.", "ORDERED", 1, "ordered">]> {
+def CudaTile_ComparisonOrdering : CudaTileI32EnumAttr<"ComparisonOrdering", "comparison_ordering", "13.1",
+    [CudaTileI32EnumAttrCase<"Unordered comparison.", "UNORDERED", 0, "13.1", "unordered">,
+     CudaTileI32EnumAttrCase<"Ordered comparison.", "ORDERED", 1, "13.1", "ordered">]> {
   let cppNamespace = "::mlir::cuda_tile";
   let genSpecializedAttr = 0;
   let specPrefixDescription = "The :code:`comparison_ordering` attribute specifies the kind of ordering to be performed in the comparison operation.";
@@ -179,14 +234,14 @@ def CudaTile_ComparisonOrderingAttr : CudaTileEnumAttr<CudaTile_ComparisonOrderi
 }
 
 def CudaTile_ComparisonPredicate : CudaTileI32EnumAttr<
-    "ComparisonPredicate", "cmp_predicate",
+    "ComparisonPredicate", "cmp_predicate", "13.1",
     [
-      CudaTileI32EnumAttrCase<"Equal comparison.", "EQUAL", 0, "equal">,
-      CudaTileI32EnumAttrCase<"Not equal comparison.", "NOT_EQUAL", 1, "not_equal">,
-      CudaTileI32EnumAttrCase<"Less than comparison.", "LESS_THAN", 2, "less_than">,
-      CudaTileI32EnumAttrCase<"Less than or equal comparison.", "LESS_THAN_OR_EQUAL", 3, "less_than_or_equal">,
-      CudaTileI32EnumAttrCase<"Greater than comparison.", "GREATER_THAN", 4, "greater_than">,
-      CudaTileI32EnumAttrCase<"Greater than or equal comparison.", "GREATER_THAN_OR_EQUAL", 5, "greater_than_or_equal">
+      CudaTileI32EnumAttrCase<"Equal comparison.", "EQUAL", 0, "13.1", "equal">,
+      CudaTileI32EnumAttrCase<"Not equal comparison.", "NOT_EQUAL", 1, "13.1", "not_equal">,
+      CudaTileI32EnumAttrCase<"Less than comparison.", "LESS_THAN", 2, "13.1", "less_than">,
+      CudaTileI32EnumAttrCase<"Less than or equal comparison.", "LESS_THAN_OR_EQUAL", 3, "13.1", "less_than_or_equal">,
+      CudaTileI32EnumAttrCase<"Greater than comparison.", "GREATER_THAN", 4, "13.1", "greater_than">,
+      CudaTileI32EnumAttrCase<"Greater than or equal comparison.", "GREATER_THAN_OR_EQUAL", 5, "13.1", "greater_than_or_equal">
     ]> {
   let cppNamespace = "::mlir::cuda_tile";
   let genSpecializedAttr = 0;
@@ -200,30 +255,31 @@ def CudaTile_ComparisonPredicateAttr : CudaTileEnumAttr<CudaTile_ComparisonPredi
 }
 
 
+
 //===----------------------------------------------------------------------===//
 // Op-specific Attributes
 //===----------------------------------------------------------------------===//
 
 def CudaTile_AtomicRMWModeAttr : CudaTileI32EnumAttr<
-    "AtomicRMWMode", "",
+    "AtomicRMWMode", "", "13.1",
     [
-      CudaTileI32EnumAttrCase<"Perform bitwise AND as the modification operation.", "AND", 0, "and">,
-      CudaTileI32EnumAttrCase<"Perform bitwise OR as the modification operation.", "OR", 1, "or">,
-      CudaTileI32EnumAttrCase<"Perform bitwise XOR as the modification operation.", "XOR", 2, "xor">,
-      CudaTileI32EnumAttrCase<"Perform integer addition as the modification operation.", "ADD", 3, "add">,
-      CudaTileI32EnumAttrCase<"Perform floating-point addition as the modification operation.", "ADDF", 4, "addf">,
-      CudaTileI32EnumAttrCase<"Perform maximum as the modification operation.", "MAX", 5, "max">,
-      CudaTileI32EnumAttrCase<"Perform minimum as the modification operation.", "MIN", 6, "min">,
-      CudaTileI32EnumAttrCase<"Perform unsigned maximum as the modification operation.", "UMAX", 7, "umax">,
-      CudaTileI32EnumAttrCase<"Perform unsigned minimum as the modification operation.", "UMIN", 8, "umin">,
-      CudaTileI32EnumAttrCase<"Perform exchange as the modification operation.", "XCHG", 9, "xchg">
+      CudaTileI32EnumAttrCase<"Perform bitwise AND as the modification operation.", "AND", 0, "13.1", "and">,
+      CudaTileI32EnumAttrCase<"Perform bitwise OR as the modification operation.", "OR", 1, "13.1", "or">,
+      CudaTileI32EnumAttrCase<"Perform bitwise XOR as the modification operation.", "XOR", 2, "13.1", "xor">,
+      CudaTileI32EnumAttrCase<"Perform integer addition as the modification operation.", "ADD", 3, "13.1", "add">,
+      CudaTileI32EnumAttrCase<"Perform floating-point addition as the modification operation.", "ADDF", 4, "13.1", "addf">,
+      CudaTileI32EnumAttrCase<"Perform maximum as the modification operation.", "MAX", 5, "13.1", "max">,
+      CudaTileI32EnumAttrCase<"Perform minimum as the modification operation.", "MIN", 6, "13.1", "min">,
+      CudaTileI32EnumAttrCase<"Perform unsigned maximum as the modification operation.", "UMAX", 7, "13.1", "umax">,
+      CudaTileI32EnumAttrCase<"Perform unsigned minimum as the modification operation.", "UMIN", 8, "13.1", "umin">,
+      CudaTileI32EnumAttrCase<"Perform exchange as the modification operation.", "XCHG", 9, "13.1", "xchg">
     ]> {
   let specPrefixDescription = "The :code:`mode` attribute specifies the mode of the atomic read-modify-write operation.";
   let specSuffixDescription = "The :code:`mode` attribute has a default value of :code:`add`.";
   let cppNamespace = "::mlir::cuda_tile";
 }
 
-def CudaTile_DivByAttr : CudaTileAttrDef<"DivBy", "div_by",
+def CudaTile_DivByAttr : CudaTileAttrDef<"DivBy", "div_by", "13.1",
     [DeclareAttrInterfaceMethods<CudaTile_AssumePredicateAttrInterface>]> {
 
   let description = [{
@@ -329,7 +385,7 @@ def CudaTile_DivByAttr : CudaTileAttrDef<"DivBy", "div_by",
 }
 
 def CudaTile_SameElementsAttr : CudaTileAttrDef<
-    "SameElements", "same_elements",
+    "SameElements", "same_elements", "13.1",
     [DeclareAttrInterfaceMethods<CudaTile_AssumePredicateAttrInterface>]> {
   let description = [{
     .. code-block:: mlir
@@ -381,7 +437,7 @@ def CudaTile_SameElementsAttr : CudaTileAttrDef<
 }
 
 def CudaTile_BoundedAttr : CudaTileAttrDef<
-    "Bounded", "bounded",
+    "Bounded", "bounded", "13.1",
     [DeclareAttrInterfaceMethods<CudaTile_AssumePredicateAttrInterface>]> {
   let description = [{
     .. code-block:: mlir
@@ -415,10 +471,10 @@ def CudaTile_BoundedAttr : CudaTileAttrDef<
 }
 
 def CudaTile_MemoryScopeAttr
-    : CudaTileI32EnumAttr<"MemoryScope", "memory scope",
-                  [CudaTileI32EnumAttrCase<"There may be concurrent accesses from within the same tile block.", "TL_BLK", 0, "tl_blk">,
-                   CudaTileI32EnumAttrCase<"There may be concurrent accesses from within the same device (i.e., GPU).", "DEVICE", 1, "device">,
-                   CudaTileI32EnumAttrCase<"There may be concurrent accesses from anywhere within the system (i.e., all devices).", "SYS", 2, "sys">]> {
+    : CudaTileI32EnumAttr<"MemoryScope", "memory scope", "13.1",
+                  [CudaTileI32EnumAttrCase<"There may be concurrent accesses from within the same tile block.", "TL_BLK", 0, "13.1", "tl_blk">,
+                   CudaTileI32EnumAttrCase<"There may be concurrent accesses from within the same device (i.e., GPU).", "DEVICE", 1, "13.1", "device">,
+                   CudaTileI32EnumAttrCase<"There may be concurrent accesses from anywhere within the system (i.e., all devices).", "SYS", 2, "13.1", "sys">]> {
   let specPrefixDescription = [{
     The :code:`memory_scope` attribute specifies a communication scope for memory operations.
     When communicating with other concurrent threads in the system, the scope must be broad enough to encompass all other
@@ -429,12 +485,12 @@ def CudaTile_MemoryScopeAttr
 }
 
 def CudaTile_MemoryOrderingSemanticsAttr
-    : CudaTileI32EnumAttr<"MemoryOrderingSemantics", "memory ordering semantics",
-                  [CudaTileI32EnumAttrCase<"No concurrent accesses to the source/destination location.", "WEAK", 0, "weak">,
-                   CudaTileI32EnumAttrCase<"There may be concurrent access to the location, but this access does not establish a happens-before relationship.", "RELAXED", 1, "relaxed">,
-                   CudaTileI32EnumAttrCase<" There may be concurrent accesses to the location. If this acquire observes a release operation, then *happens before* is established.", "ACQUIRE", 2, "acquire">,
-                   CudaTileI32EnumAttrCase<"There may be concurrent access to the location. If this release is observed with an acquire operation, then *happens before* is established.", "RELEASE", 3, "release">,
-                   CudaTileI32EnumAttrCase<"There may be concurrent accesses to the location. This has the effect of both a release and acquire operation.", "ACQ_REL", 4, "acq_rel">]> {
+    : CudaTileI32EnumAttr<"MemoryOrderingSemantics", "memory ordering semantics", "13.1",
+                  [CudaTileI32EnumAttrCase<"No concurrent accesses to the source/destination location.", "WEAK", 0, "13.1", "weak">,
+                   CudaTileI32EnumAttrCase<"There may be concurrent access to the location, but this access does not establish a happens-before relationship.", "RELAXED", 1, "13.1", "relaxed">,
+                   CudaTileI32EnumAttrCase<" There may be concurrent accesses to the location. If this acquire observes a release operation, then *happens before* is established.", "ACQUIRE", 2, "13.1", "acquire">,
+                   CudaTileI32EnumAttrCase<"There may be concurrent access to the location. If this release is observed with an acquire operation, then *happens before* is established.", "RELEASE", 3, "13.1", "release">,
+                   CudaTileI32EnumAttrCase<"There may be concurrent accesses to the location. This has the effect of both a release and acquire operation.", "ACQ_REL", 4, "13.1", "acq_rel">]> {
   let specPrefixDescription = [{
     The :code:`memory_ordering_semantics` attribute specifies the concurrency assumption between memory accesses in different threads, which controls the synchronization required.
     For example, :code:`weak` ordering allows the compiler to assume that there are no concurrent accesses to any accessed location.
@@ -445,13 +501,13 @@ def CudaTile_MemoryOrderingSemanticsAttr
 }
 
 def CudaTile_PaddingValue : CudaTileI32EnumAttr<
-    "PaddingValue", "load padding value for out of bound access",
+    "PaddingValue", "load padding value for out of bound access", "13.1",
     [
-      CudaTileI32EnumAttrCase<"zero", "zero", 0, "zero">,
-      CudaTileI32EnumAttrCase<"negative zero", "neg_zero", 1, "neg_zero">,
-      CudaTileI32EnumAttrCase<"NaN", "nan", 2, "nan">,
-      CudaTileI32EnumAttrCase<"positive infinity", "pos_inf", 3, "pos_inf">,
-      CudaTileI32EnumAttrCase<"negative infinity", "neg_inf", 4, "neg_inf">
+      CudaTileI32EnumAttrCase<"zero", "zero", 0, "13.1", "zero">,
+      CudaTileI32EnumAttrCase<"negative zero", "neg_zero", 1, "13.1", "neg_zero">,
+      CudaTileI32EnumAttrCase<"NaN", "nan", 2, "13.1", "nan">,
+      CudaTileI32EnumAttrCase<"positive infinity", "pos_inf", 3, "13.1", "pos_inf">,
+      CudaTileI32EnumAttrCase<"negative infinity", "neg_inf", 4, "13.1", "neg_inf">
     ]> {
     let specPrefixDescription = [{
       The :code:`padding_value` attribute specifies the value to return for an out-of-bounds access.
@@ -470,38 +526,34 @@ def CudaTile_PaddingValueAttr :
   let cppNamespace = "::mlir::cuda_tile";
 }
 
+
 //===----------------------------------------------------------------------===//
 // DebugInfo
 //===----------------------------------------------------------------------===//
 
 /// Wrapper class for declaring CudaTile debug info attributes.
-class CudaTile_DIAttr<string name, string attrMnemonic,
-                list<Trait> traits = [],
-                string baseCppClass = "::mlir::Attribute">
+class CudaTile_DIAttr<string name, string attrMnemonic, string version,
+                      list<Trait> traits = [],
+                      string baseCppClass = "::mlir::Attribute">
     : AttrDef<CudaTile_Dialect, name, traits, baseCppClass> {
   let mnemonic = attrMnemonic;
+  string sinceVersion = version;
 }
 
 /// Base class for all debug info attributes.
-class CudaTile_DINodeAttr<string name,
-                          string attrMnemonic,
+class CudaTile_DINodeAttr<string name, string attrMnemonic, string version,
                           list<Trait> traits = []>
-    : CudaTile_DIAttr<name, attrMnemonic, traits, "DINodeAttr"> {
-}
+    : CudaTile_DIAttr<name, attrMnemonic, version, traits, "DINodeAttr">;
 
 /// Represents a debug info scope.
-class CudaTile_DIScopeAttr<string name,
-                           string attrMnemonic,
+class CudaTile_DIScopeAttr<string name, string attrMnemonic, string version,
                            list<Trait> traits = []>
-    : CudaTile_DIAttr<name, attrMnemonic, traits, "DIScopeAttr"> {
-}
+    : CudaTile_DIAttr<name, attrMnemonic, version, traits, "DIScopeAttr">;
 
 /// Represents a local debug info scope.
-class CudaTile_DILocalScopeAttr<string name,
-                                string attrMnemonic,
+class CudaTile_DILocalScopeAttr<string name, string attrMnemonic, string version,
                                 list<Trait> traits = []>
-    : CudaTile_DIAttr<name, attrMnemonic, traits, "DILocalScopeAttr"> {
-}
+    : CudaTile_DIAttr<name, attrMnemonic, version, traits, "DILocalScopeAttr">;
 
 //===----------------------------------------------------------------------===//
 // DILocAttr
@@ -516,6 +568,9 @@ def CudaTile_DILocAttr : LocationAttrDef<CudaTile_Dialect, "DILoc"> {
   }];
   let mnemonic = "di_loc";
 
+  // Version when this attribute was introduced.
+  string sinceVersion = "13.1";
+
   let parameters = (ins
     "FileLineColLoc":$sourceLoc,
     "DILocalScopeAttr":$scope
@@ -528,7 +583,7 @@ def CudaTile_DILocAttr : LocationAttrDef<CudaTile_Dialect, "DILoc"> {
 //===----------------------------------------------------------------------===//
 
 def CudaTile_DICompileUnitAttr : CudaTile_DIScopeAttr<"DICompileUnit",
-                                                      "di_compile_unit",
+                                                      "di_compile_unit", "13.1",
                                                       /*traits=*/[]> {
   let description = [{
     Represents a compilation unit, the root scope of all objects declared
@@ -546,7 +601,7 @@ def CudaTile_DICompileUnitAttr : CudaTile_DIScopeAttr<"DICompileUnit",
 //===----------------------------------------------------------------------===//
 
 def CudaTile_DIFileAttr : CudaTile_DIScopeAttr<"DIFile",
-                                               "di_file",
+                                               "di_file", "13.1",
                                                /*traits=*/[]> {
   let description = [{
     Represents a source file; specifies the file name and directory of the
@@ -561,7 +616,7 @@ def CudaTile_DIFileAttr : CudaTile_DIScopeAttr<"DIFile",
 //===----------------------------------------------------------------------===//
 
 def CudaTile_DILexicalBlockAttr : CudaTile_DILocalScopeAttr<"DILexicalBlock",
-                                                            "di_lexical_block",
+                                                            "di_lexical_block", "13.1",
                                                             /*traits=*/[]> {
   let description = [{
     Represents a lexical block nested within a subprogram; specifies the
@@ -583,7 +638,7 @@ def CudaTile_DILexicalBlockAttr : CudaTile_DILocalScopeAttr<"DILexicalBlock",
 //===----------------------------------------------------------------------===//
 
 def CudaTile_DISubprogramAttr : CudaTile_DILocalScopeAttr<"DISubprogram",
-                                                          "di_subprogram",
+                                                          "di_subprogram", "13.1",
                                                           /*traits=*/[]> {
   let description = [{
     Represents a function within the source language; specifies the scope, file,
@@ -599,6 +654,34 @@ def CudaTile_DISubprogramAttr : CudaTile_DILocalScopeAttr<"DISubprogram",
     OptionalParameter<"unsigned">:$scopeLine
   );
   let assemblyFormat = "`<` struct(params) `>`";
+
+  let extraClassDeclaration = [{
+    /// Return an otherwise exact copy of `this` with a new linkage name.
+    DISubprogramAttr cloneWithNewLinkageName(StringAttr newLinkageName);
+  }];
+
+  let extraClassDefinition = [{
+    $cppClass $cppClass::cloneWithNewLinkageName(StringAttr newLinkageName) {
+      return $cppClass::get(getContext(), getFile(), getLine(), getName(), newLinkageName,
+              getCompileUnit(), getScopeLine());
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Symbol Visibility Attribute
+//===----------------------------------------------------------------------===//
+
+def CudaTile_SymbolVisibility : CudaTileI32EnumAttr<
+    "SymbolVisibility", "symbol visibility", "13.1",
+    [CudaTileI32EnumAttrCase<"Public visibility.", "Public", 0, "13.1", "public">,
+     CudaTileI32EnumAttrCase<"Private visibility.", "Private", 1, "13.1", "private">]> {
+    let genSpecializedAttr = 0;
+    let cppNamespace = "::mlir::cuda_tile";
+}
+
+def CudaTile_SymbolVisibilityAttr : CudaTileEnumAttr<CudaTile_SymbolVisibility, "symbol_visibility"> {
+    let assemblyFormat = "`<` $value `>`";
 }
 
 #endif  // CUDATILE_DIALECT_CUDATILE_IR_ATTRDEFS_TD

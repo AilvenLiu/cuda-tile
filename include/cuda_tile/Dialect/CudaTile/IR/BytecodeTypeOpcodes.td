@@ -23,53 +23,45 @@ include "cuda_tile/Dialect/CudaTile/IR/Types.td"
 //===----------------------------------------------------------------------===//
 
 /// Base class for type tag assignments.
-/// sinceVersion: The minimum bytecode version that supports this type.
-///               This is the earliest version where the type is available.
-class BytecodeTypeTag<string typeName, int tag, string version = "13.1"> {
+class BytecodeTypeTag<string typeName, int tag> {
   string cppTypeName = typeName;
   int typeTagValue = tag;
-  string sinceVersion = version;
 }
 
 /// Integer type tag.
-class IntegerTypeTag<string name, int tag, int width,
-                     string version = "13.1">
-    : BytecodeTypeTag<name, tag, version> {
+class IntegerTypeTag<string name, int tag, int width>
+    : BytecodeTypeTag<name, tag> {
   int integerBitWidth = width;
 }
 
 /// Float type tag.
-class FloatTypeTag<string name, int tag, string floatType = "",
-                   string version = "13.1">
-    : BytecodeTypeTag<name, tag, version> {
+class FloatTypeTag<string name, int tag, string floatType = "">
+    : BytecodeTypeTag<name, tag> {
   string floatMlirTypeName = floatType;
 }
 
 /// CudaTile type tag.
-class CudaTileTypeTag<string name, int tag, string version = "13.1">
-    : BytecodeTypeTag<name, tag, version>;
+class CudaTileTypeTag<string name, int tag>
+  : BytecodeTypeTag<name, tag> {
+}
 
 //===----------------------------------------------------------------------===//
 // Explicit Type Tag Assignments - FROZEN for backward compatibility.
 //===----------------------------------------------------------------------===//
 
-// Integer types from 13.1.
-def : IntegerTypeTag<"I1", 0, 1>;
-def : IntegerTypeTag<"I8", 1, 8>;
-def : IntegerTypeTag<"I16", 2, 16>;
-def : IntegerTypeTag<"I32", 3, 32>;
-def : IntegerTypeTag<"I64", 4, 64>;
-
-// Float types from 13.1.
-def : FloatTypeTag<"F16", 5, "Float16Type">;
-def : FloatTypeTag<"BF16", 6, "BFloat16Type">;
-def : FloatTypeTag<"F32", 7, "Float32Type">;
-def : FloatTypeTag<"TF32", 8, "FloatTF32Type">;
-def : FloatTypeTag<"F64", 9, "Float64Type">;
-def : FloatTypeTag<"F8E4M3FN", 10, "Float8E4M3FNType">;
-def : FloatTypeTag<"F8E5M2", 11, "Float8E5M2Type">;
-
-// CudaTile types from 13.1 (auto-generated from CudaTileTypeDef).
+// 13.1 types.
+def : IntegerTypeTag<"Int1", 0, 1>;
+def : IntegerTypeTag<"Int8", 1, 8>;
+def : IntegerTypeTag<"Int16", 2, 16>;
+def : IntegerTypeTag<"Int32", 3, 32>;
+def : IntegerTypeTag<"Int64", 4, 64>;
+def : FloatTypeTag<"Float16", 5, "Float16Type">;
+def : FloatTypeTag<"BFloat16", 6, "BFloat16Type">;
+def : FloatTypeTag<"Float32", 7, "Float32Type">;
+def : FloatTypeTag<"TFloat32", 8, "FloatTF32Type">;
+def : FloatTypeTag<"Float64", 9, "Float64Type">;
+def : FloatTypeTag<"Float8E4M3FN", 10, "Float8E4M3FNType">;
+def : FloatTypeTag<"Float8E5M2", 11, "Float8E5M2Type">;
 def : CudaTileTypeTag<"PointerType", 12>;
 def : CudaTileTypeTag<"TileType", 13>;
 def : CudaTileTypeTag<"TensorViewType", 14>;
@@ -77,7 +69,18 @@ def : CudaTileTypeTag<"PartitionViewType", 15>;
 def : CudaTileTypeTag<"FunctionType", 16>;
 def : CudaTileTypeTag<"TokenType", 17>;
 
-// Versioned float types from 13.2.
-def : FloatTypeTag<"F8E8M0FNU", 18, "Float8E8M0FNUType", "13.2">;
+// 13.2 types.
+def : FloatTypeTag<"Float8E8M0FNU", 18, "Float8E8M0FNUType">;
+
+// 13.3 types.
+def : FloatTypeTag<"Float4E2M1FN", 19, "Float4E2M1FNType">;
+def : CudaTileTypeTag<"GatherScatterViewType", 20>;
+def : CudaTileTypeTag<"StridedViewType", 21>;
+def : IntegerTypeTag<"Int4", 22, 4>;
+
+#ifdef TILE_IR_INCLUDE_TESTS
+// Testing type for parameter versioning evolution (version from TestingTypes.td).
+def : CudaTileTypeTag<"BytecodeTestEvolvedType", 200>;
+#endif // TILE_IR_INCLUDE_TESTS
 
 #endif // CUDATILE_DIALECT_CUDATILE_IR_BYTECODE_TYPE_OPCODES_TD

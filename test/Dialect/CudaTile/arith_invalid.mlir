@@ -67,6 +67,35 @@ cuda_tile.module @addi_invalid_fp_element {
 
 // -----
 
+cuda_tile.module @addi_invalid_i4_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xi4>, %arg1: !cuda_tile.tile<2x4x8xi4>) {
+        // expected-error @below{{'cuda_tile.addi' op operand #0 must be tile of i1 or i8 or i16 or i32 or i64 values}}
+        %0 = cuda_tile.addi %arg0, %arg1 : !cuda_tile.tile<2x4x8xi4>
+    }
+}
+
+// -----
+
+// ftoi to i4 is not allowed 
+cuda_tile.module @ftoi_invalid_i4 {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<8xf32>) {
+        // expected-error @below{{'cuda_tile.ftoi' op result #0 must be tile of i1 or i8 or i16 or i32 or i64 values}}
+        %0 = cuda_tile.ftoi %arg0 signed : !cuda_tile.tile<8xf32> -> !cuda_tile.tile<8xi4>
+    }
+}
+
+// -----
+
+// itof from i4 is not allowed
+cuda_tile.module @itof_invalid_i4 {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<8xi4>) {
+        // expected-error @below{{'cuda_tile.itof' op operand #0 must be tile of i1 or i8 or i16 or i32 or i64 values}}
+        %0 = cuda_tile.itof %arg0 signed : !cuda_tile.tile<8xi4> -> !cuda_tile.tile<8xf32>
+    }
+}
+
+// -----
+
 cuda_tile.module @andi_mismatching_rank_inputs {// expected-note @below{{prior use here}}
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xi32>, %arg1: !cuda_tile.tile<1x2x4x8xi32>) {
         // expected-error @below{{use of value '%arg1' expects different type than prior uses}}

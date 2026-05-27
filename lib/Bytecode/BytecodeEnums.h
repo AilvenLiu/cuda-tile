@@ -36,7 +36,8 @@ enum : uint8_t {
   Constant = 0x04,
   Type = 0x05,
   Global = 0x06,
-  NumSections = 0x07
+  Producer = 0x07,
+  NumSections = 0x08
 };
 } // namespace Section
 
@@ -72,20 +73,10 @@ enum class FunctionFlags : uint8_t {
 };
 
 /// Enum representing different attribute kinds in the bytecode.
-enum class AttributeTag : uint8_t {
-  Integer = 1,
-  Float = 2,
-  Bool = 3,
-  Type = 4,
-  String = 5,
-  Array = 6,
-  DenseElements = 7,
-  DivBy = 8,
-  SameElements = 9,
-  Dictionary = 10,
-  OptimizationHints = 11,
-  Bounded = 12,
-};
+/// This enum is auto-generated from BytecodeAttrOpcodes.td.
+#define GEN_ATTR_TAG_ENUM
+#include "../Writer/AttrBytecode.inc"
+#undef GEN_ATTR_TAG_ENUM
 
 } // namespace Bytecode
 } // namespace cuda_tile

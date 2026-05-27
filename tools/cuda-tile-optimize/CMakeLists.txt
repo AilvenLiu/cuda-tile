@@ -21,7 +21,7 @@ target_link_libraries(cuda-tile-optimize PRIVATE
   ${LIBS}
   LLVMSupport
 )
-llvm_update_compile_flags(cuda-tile-optimize) 
+llvm_update_compile_flags(cuda-tile-optimize)
 
 # Set the date for the version information.
 if (NOT STD_DATE)

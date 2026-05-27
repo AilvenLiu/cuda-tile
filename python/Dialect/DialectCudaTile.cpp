@@ -15,8 +15,10 @@
 
 #include "cuda_tile-c/Dialect/CudaTileDialect.h"
 #include "cuda_tile-c/Dialect/CudaTileOptimizer.h"
+
 namespace nb = nanobind;
 using namespace mlir::python::nanobind_adaptors;
+
 
 NB_MODULE(_cuda_tile, m) {
   //===--------------------------------------------------------------------===//
@@ -346,6 +348,116 @@ NB_MODULE(_cuda_tile, m) {
         return mlirCudaTilePartitionViewTypeGetViewIndexRank(type);
       });
 
+  mlir_type_subclass(m, "StridedViewType",
+                     [](MlirType type) -> bool {
+                       return mlirCudaTileTypeIsAStridedViewType(type);
+                     })
+      .def_classmethod(
+          "get",
+          [](const nb::object &cls, const std::vector<int32_t> &tileShape,
+             const std::vector<int32_t> &traversalStrides,
+             MlirType wrappedTensorViewType,
+             const std::optional<std::vector<int32_t>> &dimMap,
+             const nb::object &paddingValue,
+             MlirContext context) -> nb::object {
+            if (!mlirCudaTileTypeIsATensorViewType(wrappedTensorViewType)) {
+              throw nb::type_error("expected tensor_view type");
+            }
+
+            std::vector<int32_t> dimMapInPlace;
+            const std::vector<int32_t> *dimMapParam;
+            if (dimMap.has_value()) {
+              dimMapParam = &dimMap.value();
+            } else {
+              dimMapInPlace.resize(tileShape.size());
+              for (size_t i = 0; i < tileShape.size(); ++i) {
+                dimMapInPlace[i] = static_cast<int32_t>(i);
+              }
+              dimMapParam = &dimMapInPlace;
+            }
+
+            MlirAttribute paddingValueAttr = {nullptr};
+            if (!paddingValue.is_none()) {
+              paddingValueAttr = nb::cast<MlirAttribute>(paddingValue);
+            }
+
+            // Create DenseI32ArrayAttr for tile shape
+            MlirAttribute tileShapeAttr = mlirCudaTileDenseI32ArrayAttrGet(
+                context, tileShape.size(), tileShape.data());
+
+            // Create DenseI32ArrayAttr for  traversal strides
+            MlirAttribute traversalStridesAttr =
+                mlirCudaTileDenseI32ArrayAttrGet(
+                    context, traversalStrides.size(), traversalStrides.data());
+
+            MlirType type = mlirCudaTileStridedViewTypeGetChecked(
+                context, tileShapeAttr, traversalStridesAttr,
+                wrappedTensorViewType, dimMapParam->size(), dimMapParam->data(),
+                paddingValueAttr);
+            if (mlirTypeIsNull(type))
+              return nb::none();
+            return cls(type);
+          },
+          nb::arg("cls"), nb::arg("tile_shape"), nb::arg("traversal_strides"),
+          nb::arg("tensor_view_type"), nb::arg("dim_map") = nb::none(),
+          nb::arg("padding_value") = nb::none(),
+          nb::arg("context") = nb::none())
+      .def_property_readonly(
+          "tile_shape",
+          [](MlirType type) -> std::vector<int32_t> {
+            MlirAttribute shapeAttr =
+                mlirCudaTileStridedViewTypeGetTileShape(type);
+            intptr_t numElements =
+                mlirCudaTileDenseI32ArrayAttrGetNumElements(shapeAttr);
+            std::vector<int32_t> result(numElements);
+            for (intptr_t i = 0; i < numElements; ++i) {
+              result[i] = mlirCudaTileDenseI32ArrayAttrGetElement(shapeAttr, i);
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "traversal_strides",
+          [](MlirType type) -> std::vector<int32_t> {
+            MlirAttribute traversalStridesAttr =
+                mlirCudaTileStridedViewTypeGetTraversalStrides(type);
+            intptr_t numElements = mlirCudaTileDenseI32ArrayAttrGetNumElements(
+                traversalStridesAttr);
+            std::vector<int32_t> result(numElements);
+            for (intptr_t i = 0; i < numElements; ++i) {
+              result[i] = mlirCudaTileDenseI32ArrayAttrGetElement(
+                  traversalStridesAttr, i);
+            }
+            return result;
+          })
+      .def_property_readonly("tensor_view",
+                             [](MlirType type) -> MlirType {
+                               return mlirCudaTileStridedViewTypeGetTensorView(
+                                   type);
+                             })
+      .def_property_readonly(
+          "dim_map",
+          [](MlirType type) -> std::vector<int32_t> {
+            intptr_t rank = mlirCudaTileStridedViewTypeGetDimMapRank(type);
+            std::vector<int32_t> result(rank);
+            for (intptr_t i = 0; i < rank; ++i) {
+              result[i] = mlirCudaTileStridedViewTypeGetDimMapElement(type, i);
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "padding_value",
+          [](MlirType type) -> MlirAttribute {
+            return mlirCudaTileStridedViewTypeGetPaddingValue(type);
+          })
+      .def_property_readonly(
+          "view_tile_type",
+          [](MlirType type) -> MlirType {
+            return mlirCudaTileStridedViewTypeGetViewTileType(type);
+          })
+      .def_property_readonly("view_index_rank", [](MlirType type) -> size_t {
+        return mlirCudaTileStridedViewTypeGetViewIndexRank(type);
+      });
+
   mlir_attribute_subclass(m, "RoundingModeAttr",
                           [](MlirAttribute attr) -> bool {
                             return mlirCudaTileAttributeIsARoundingModeAttr(
@@ -380,34 +492,35 @@ NB_MODULE(_cuda_tile, m) {
       })
       .def_classmethod(
           "getEntryOpHint",
-          [](const nb::object &cls, const std::string &arch, const int &num_cta,
-             const int &occupancy, MlirContext context) -> nb::object {
+          [](const nb::object &cls, const std::string &arch, int num_cta,
+             int num_worker_warps, int occupancy,
+             MlirContext context) -> nb::object {
             MlirStringRef archStr =
                 mlirStringRefCreateFromCString(arch.c_str());
             MlirAttribute attr =
                 mlirCudaTileOptimizationHintsAttrGetEntryOpHint(
-                    context, archStr, num_cta, occupancy);
+                    context, archStr, num_cta, num_worker_warps, occupancy);
             return cls(attr);
           },
           nb::arg("cls"), nb::arg("arch"), nb::arg("num_cta"),
-          nb::arg("occupancy"), nb::arg("context") = nb::none())
+          nb::arg("num_worker_warps"), nb::arg("occupancy"),
+          nb::arg("context") = nb::none())
       .def_classmethod(
           "getLoadStoreOpHint",
           [](const nb::object &cls, const std::string &arch,
-             const nb::object &allow_tma, const int &latency,
+             std::optional<bool> allow_tma, int latency,
              MlirContext context) -> nb::object {
             MlirStringRef archStr =
                 mlirStringRefCreateFromCString(arch.c_str());
-            // Convert Python None/True/False to -1/1/0
             int8_t allowTmaValue = -1; // default: not specified
-            if (!allow_tma.is_none())
-              allowTmaValue = nb::cast<bool>(allow_tma) ? 1 : 0;
+            if (allow_tma.has_value())
+              allowTmaValue = *allow_tma ? 1 : 0;
             MlirAttribute attr =
                 mlirCudaTileOptimizationHintsAttrGetLoadStoreOpHint(
                     context, archStr, allowTmaValue, latency);
             return cls(attr);
           },
-          nb::arg("cls"), nb::arg("arch"), nb::arg("allow_tma"),
+          nb::arg("cls"), nb::arg("arch"), nb::arg("allow_tma") = nb::none(),
           nb::arg("latency"), nb::arg("context") = nb::none());
 
   mlir_attribute_subclass(
@@ -551,6 +664,31 @@ NB_MODULE(_cuda_tile, m) {
         MlirStringRef valueRef = mlirCudaTileSignednessAttrGetValue(self);
         return std::string(valueRef.data, valueRef.length);
       });
+
+  mlir_attribute_subclass(m, "SymbolVisibilityAttr",
+                          [](MlirAttribute attr) -> bool {
+                            return mlirCudaTileAttributeIsASymbolVisibilityAttr(
+                                attr);
+                          })
+      .def_classmethod(
+          "get",
+          [](const nb::object &cls, const std::string &value,
+             MlirContext context) -> nb::object {
+            MlirStringRef valueStr =
+                mlirStringRefCreateFromCString(value.c_str());
+            MlirAttribute attr =
+                mlirCudaTileSymbolVisibilityAttrGet(context, valueStr);
+            if (mlirAttributeIsNull(attr))
+              throw std::invalid_argument("Invalid symbol visibility: " +
+                                          value);
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("value"), nb::arg("context") = nb::none())
+      .def_property_readonly("value", [](MlirAttribute self) -> std::string {
+        MlirStringRef valueRef = mlirCudaTileSymbolVisibilityAttrGetValue(self);
+        return std::string(valueRef.data, valueRef.length);
+      });
+
   mlir_attribute_subclass(
       m, "ComparisonOrderingAttr",
       [](MlirAttribute attr) -> bool {
@@ -575,6 +713,7 @@ NB_MODULE(_cuda_tile, m) {
             mlirCudaTileComparisonOrderingAttrGetValue(self);
         return std::string(valueRef.data, valueRef.length);
       });
+
   mlir_attribute_subclass(
       m, "ComparisonPredicateAttr",
       [](MlirAttribute attr) -> bool {

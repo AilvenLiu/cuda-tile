@@ -6,16 +6,18 @@ add_tablegen(cuda-tile-tblgen CUDA_TILE
   DESTINATION "${MLIR_TOOLS_INSTALL_DIR}"
   EXPORT CUDA_TILE
   cuda-tile-tblgen.cpp
+  BytecodeAttrAnalysis.cpp
+  BytecodeAttrCodeGen.cpp
   BytecodeGen.cpp
   BytecodeGenUtilities.cpp
+  BytecodeReaderGen.cpp
   BytecodeTypeAnalysis.cpp
   BytecodeTypeCodeGen.cpp
-  SpecGen.cpp
-  Emitter.cpp
+  CudaTileAttr.cpp
   CudaTileOp.cpp
   CudaTileType.cpp
-  CudaTileAttr.cpp
-  BytecodeReaderGen.cpp
+  Emitter.cpp
+  SpecGen.cpp
 )
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

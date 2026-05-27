@@ -18,6 +18,7 @@
 #include "cuda_tile/Bytecode/Common/Version.h"
 #include "cuda_tile/Bytecode/Reader/BytecodeReader.h"
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::cuda_tile;
@@ -33,9 +34,13 @@ static LogicalResult roundTripModule(cuda_tile::ModuleOp op,
   // First, serialize the module to bytecode
   SmallVector<char, 4096> bytecodeBuffer;
   llvm::raw_svector_ostream rvo(bytecodeBuffer);
+  MLIRContext *context = op->getContext();
+  auto dialect = cast<CudaTileDialect>(op->getDialect());
+  dialect->setWarnUnsupportedHints(getWarnUnsupportedHints());
+  dialect->setErrorOnHints(getErrorUnsupportedHints());
   if (failed(writeBytecode(rvo, op, version)))
     return failure();
-  MLIRContext *context = op->getContext();
+
   llvm::MemoryBufferRef bytecodeBufferRef(
       llvm::StringRef(bytecodeBuffer.data(), bytecodeBuffer.size()),
       "roundTripModuleBuffer");

@@ -89,7 +89,7 @@ parseOptionalPaddingValue(AsmParser &parser) {
 /// Parse a type, if type is unprefixed, assume it is from the cuda_tile dialect
 ParseResult cuda_tile::parseCudaTileType(AsmParser &p, Type &type) {
   auto result = p.parseOptionalType(type);
-  if (result.has_value() && succeeded(*result))
+  if (result.has_value())
     return *result;
 
   StringRef mnemonic;
@@ -186,6 +186,13 @@ void cuda_tile::TileType::print(AsmPrinter &printer) const {
 LogicalResult
 cuda_tile::TileType::verify(function_ref<InFlightDiagnostic()> emitError,
                             ArrayRef<int64_t> shape, Type elementType) {
+  if (isa<Float4E2M1FNType>(elementType)) {
+    // f4 must have an even number of elements to pack 2 per byte
+    if (shape.empty() ||
+        llvm::all_of(shape, [](int64_t dim) { return dim % 2 != 0; }))
+      return emitError()
+             << "F4E2M1FN tiles must have an even number of elements";
+  }
   return verifyTileSize(emitError, shape);
 }
 
@@ -388,34 +395,38 @@ size_t cuda_tile::TensorViewType::dynamicStrideAmount() {
 // PartitionView Type
 //===----------------------------------------------------------------------===//
 
-Type cuda_tile::PartitionViewType::parse(AsmParser &parser) {
-  SMLoc loc = parser.getCurrentLocation();
-  SmallVector<int64_t> tileShape;
-
-  if (parser.parseLess())
-    return Type();
-
+static ParseResult parseViewTileShape(AsmParser &parser,
+                                      SmallVector<int32_t> &tileShape) {
   if (parser.parseKeyword("tile") || parser.parseEqual())
-    return Type();
+    return ParseResult::failure();
 
   SMLoc dimListLoc = parser.getCurrentLocation();
+
+  SmallVector<int64_t> tileShape64;
   if (parser.parseLParen() ||
-      parser.parseDimensionList(tileShape, /*allowDynamic=*/false,
+      parser.parseDimensionList(tileShape64, /*allowDynamic=*/false,
                                 /*withTrailingX=*/false) ||
-      parser.parseRParen() || parser.parseComma())
-    return Type();
+      parser.parseRParen())
+    return ParseResult::failure();
 
-  FailureOr<PaddingValueAttr> paddingValue = parseOptionalPaddingValue(parser);
-  if (failed(paddingValue))
-    return Type();
-  else if (*paddingValue && parser.parseComma())
-    return Type();
+  for (auto [i, v] : llvm::enumerate(tileShape64)) {
+    if (v <= 0 || v > std::numeric_limits<int32_t>::max()) {
+      return parser.emitError(dimListLoc)
+             << "tile dimension " << i << " exceeds i32 limitations (got " << v
+             << ", expected strictly positive and less than or equal to "
+             << std::numeric_limits<int32_t>::max() << ")";
+    }
+    tileShape.push_back(static_cast<int32_t>(v));
+  }
 
-  TensorViewType tensor_view;
-  if (parseCudaTileType(parser, tensor_view))
-    return Type();
+  return ParseResult::success();
+}
 
-  SmallVector<int32_t> dimMap;
+/// Parses an optional comma followed by a dimMap, returning the identity dimMap
+/// if absent.
+static ParseResult parseOptionalViewDimMap(AsmParser &parser,
+                                           SmallVector<int32_t> &dimMap,
+                                           size_t tileRank) {
   auto parseDimMapElem = [&]() -> ParseResult {
     int32_t dim;
     if (parser.parseInteger(dim))
@@ -428,55 +439,87 @@ Type cuda_tile::PartitionViewType::parse(AsmParser &parser) {
     if (parser.parseKeyword("dim_map") || parser.parseEqual() ||
         parser.parseCommaSeparatedList(AsmParser::Delimiter::Square,
                                        parseDimMapElem, "dim map"))
-      return Type();
+      return ParseResult::failure();
   } else {
     // By default, dimMap is the identity mapping.
-    for (int32_t i : llvm::seq(tileShape.size()))
+    for (int32_t i : llvm::seq(tileRank))
       dimMap.push_back(i);
   }
+
+  return ParseResult::success();
+}
+
+Type cuda_tile::PartitionViewType::parse(AsmParser &parser) {
+  SMLoc loc = parser.getCurrentLocation();
+
+  if (parser.parseLess())
+    return Type();
+
+  SmallVector<int32_t> tileShape;
+  if (parseViewTileShape(parser, tileShape) || parser.parseComma())
+    return Type();
+
+  FailureOr<PaddingValueAttr> paddingValue = parseOptionalPaddingValue(parser);
+  if (failed(paddingValue))
+    return Type();
+  else if (*paddingValue && parser.parseComma())
+    return Type();
+
+  Type parsedType;
+  if (parseCudaTileType(parser, parsedType))
+    return Type();
+  auto tensor_view = dyn_cast<TensorViewType>(parsedType);
+  if (!tensor_view) {
+    parser.emitError(parser.getCurrentLocation())
+        << "expected 'tensor_view' type, but got " << parsedType;
+    return Type();
+  }
+
+  SmallVector<int32_t> dimMap;
+  if (parseOptionalViewDimMap(parser, dimMap, tileShape.size()))
+    return Type();
 
   if (parser.parseGreater())
     return Type();
 
-  SmallVector<int32_t> tileShape32;
-  for (auto [i, v] : llvm::enumerate(tileShape)) {
-    if (v <= 0 || v > std::numeric_limits<int32_t>::max()) {
-      parser.emitError(dimListLoc)
-          << "tile dimension " << i << " exceeds i32 limitations (got " << v
-          << ", expected strictly positive and less than or equal to "
-          << std::numeric_limits<int32_t>::max() << ")";
-      return Type();
-    }
-    tileShape32.push_back(static_cast<int32_t>(v));
-  }
-
   return parser.getChecked<cuda_tile::PartitionViewType>(
       loc, parser.getContext(),
-      DenseI32ArrayAttr::get(parser.getContext(), tileShape32), tensor_view,
+      DenseI32ArrayAttr::get(parser.getContext(), tileShape), tensor_view,
       dimMap, *paddingValue);
+}
+
+static void printViewTileShape(AsmPrinter &printer,
+                               ArrayRef<int32_t> tileShape) {
+  printer << "tile=(";
+  llvm::interleave(tileShape, printer, "x");
+  printer << ")";
+}
+
+static void printOptionalViewPaddingValue(AsmPrinter &printer,
+                                          PaddingValueAttr paddingValue) {
+  if (paddingValue)
+    printer << "padding_value = "
+            << stringifyPaddingValue(paddingValue.getValue()) << ", ";
+}
+
+static void printOptionalViewDimMap(AsmPrinter &printer,
+                                    ArrayRef<int32_t> dimMap) {
+  if (!llvm::equal(dimMap, llvm::seq(dimMap.size())))
+    printer << ", dim_map=[" << dimMap << "]";
 }
 
 void cuda_tile::PartitionViewType::print(AsmPrinter &printer) const {
   printer << "<";
-  printer << "tile=(";
-  llvm::interleave(getTileShape().asArrayRef(), printer, "x");
-  printer << "), ";
-  if (getPaddingValue())
-    printer << "padding_value = "
-            << stringifyPaddingValue(getPaddingValue().getValue()) << ", ";
-
+  printViewTileShape(printer, getTileShape().asArrayRef());
+  printer << ", ";
+  printOptionalViewPaddingValue(printer, getPaddingValue());
   printCudaTileType(printer, getTensorView());
-
-  // Only print mapping if non-trivial.
-  bool isIdentityMapping =
-      llvm::equal(getDimMap(), llvm::seq(getTileShape().size()));
-  if (!isIdentityMapping)
-    printer << ", dim_map=[" << getDimMap() << "]";
-
+  printOptionalViewDimMap(printer, getDimMap());
   printer << ">";
 }
 
-LogicalResult cuda_tile::PartitionViewType::verify(
+/// Verifies requirements that are shared between all grid-like views.
+static LogicalResult verifyPartitionViewLike(
     function_ref<InFlightDiagnostic()> emitError,
     DenseI32ArrayAttr tileShapeAttr, cuda_tile::TensorViewType tensorView,
     ArrayRef<int32_t> dimMap, PaddingValueAttr paddingValue) {
@@ -522,7 +565,7 @@ LogicalResult cuda_tile::PartitionViewType::verify(
       return emitError()
              << "target dimension is outside of tensor view dimensions, "
                 "expected strictly less than "
-             << tileShape.size() << ", got " << tensorViewDim;
+             << tensorView.getShape().size() << ", got " << tensorViewDim;
 
     if (usedTensorViewDim[tensorViewDim].has_value())
       return emitError() << "target dimension " << tensorViewDim
@@ -561,6 +604,14 @@ LogicalResult cuda_tile::PartitionViewType::verify(
   return success();
 }
 
+LogicalResult cuda_tile::PartitionViewType::verify(
+    function_ref<InFlightDiagnostic()> emitError,
+    DenseI32ArrayAttr tileShapeAttr, cuda_tile::TensorViewType tensorView,
+    ArrayRef<int32_t> dimMap, PaddingValueAttr paddingValue) {
+  return verifyPartitionViewLike(emitError, tileShapeAttr, tensorView, dimMap,
+                                 paddingValue);
+}
+
 size_t cuda_tile::PartitionViewType::getViewIndexRank() const {
   return getTileShape().size();
 }
@@ -570,6 +621,398 @@ Type cuda_tile::PartitionViewType::getViewTileType() const {
   llvm::transform(getTileShape().asArrayRef(), shape64.begin(),
                   [](int32_t x) -> int64_t { return x; });
   return cuda_tile::TileType::get(shape64, getTensorView().getElementType());
+}
+
+LogicalResult cuda_tile::PartitionViewType::verifyIndices(
+    function_ref<InFlightDiagnostic()> emitError, TypeRange indexTypes) const {
+  if (indexTypes.empty())
+    return success();
+
+  // All indices must be scalar tiles.
+  for (Type t : indexTypes) {
+    auto tileType = dyn_cast<TileType>(t);
+    if (!tileType) {
+      return emitError() << "expected index type to be a tile type, got " << t;
+    }
+    if (tileType.getRank() != 0) {
+      return emitError() << "expected index type to be a scalar tile, got "
+                         << tileType;
+    }
+  }
+
+  // All indices must have the same type.
+  Type baseIndexType = indexTypes.front();
+  for (const auto &[i, indexType] : llvm::enumerate(indexTypes)) {
+    if (indexType != baseIndexType)
+      return emitError() << "expected index type " << i
+                         << " to be the same as other index types ("
+                         << baseIndexType << "), got " << indexType;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// StridedView Type
+//===----------------------------------------------------------------------===//
+
+static ParseResult
+parseViewTraversalStrides(AsmParser &parser,
+                          SmallVector<int32_t> &traversalStrides) {
+  if (parser.parseKeyword("traversal_strides") || parser.parseEqual())
+    return ParseResult::failure();
+
+  auto parseStrideElement = [&]() {
+    int32_t element;
+    ParseResult result = parser.parseInteger(element);
+    if (succeeded(result))
+      traversalStrides.push_back(element);
+    return result;
+  };
+
+  return parser.parseCommaSeparatedList(AsmParser::Delimiter::Square,
+                                        parseStrideElement);
+}
+
+Type cuda_tile::StridedViewType::parse(AsmParser &parser) {
+  SMLoc loc = parser.getCurrentLocation();
+
+  if (parser.parseLess())
+    return Type();
+
+  SmallVector<int32_t> tileShape;
+  SmallVector<int32_t> traversalStrides;
+  if (parseViewTileShape(parser, tileShape) || parser.parseComma() ||
+      parseViewTraversalStrides(parser, traversalStrides) ||
+      parser.parseComma())
+    return Type();
+
+  FailureOr<PaddingValueAttr> paddingValue = parseOptionalPaddingValue(parser);
+  if (failed(paddingValue))
+    return Type();
+  else if (*paddingValue && parser.parseComma())
+    return Type();
+
+  Type parsedType;
+  if (parseCudaTileType(parser, parsedType))
+    return Type();
+  auto tensor_view = dyn_cast<TensorViewType>(parsedType);
+  if (!tensor_view) {
+    parser.emitError(parser.getCurrentLocation())
+        << "expected 'tensor_view' type, but got " << parsedType;
+    return Type();
+  }
+
+  SmallVector<int32_t> dimMap;
+  if (parseOptionalViewDimMap(parser, dimMap, tileShape.size()))
+    return Type();
+
+  if (parser.parseGreater())
+    return Type();
+
+  return parser.getChecked<cuda_tile::StridedViewType>(
+      loc, parser.getContext(),
+      DenseI32ArrayAttr::get(parser.getContext(), tileShape),
+      DenseI32ArrayAttr::get(parser.getContext(), traversalStrides),
+      tensor_view, dimMap, *paddingValue);
+}
+
+static void printViewTraversalStrides(AsmPrinter &printer,
+                                      ArrayRef<int32_t> traversalStrides) {
+  printer << "traversal_strides=[";
+  llvm::interleave(traversalStrides, printer, ",");
+  printer << "]";
+}
+
+void cuda_tile::StridedViewType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printViewTileShape(printer, getTileShape().asArrayRef());
+  printer << ", ";
+  printViewTraversalStrides(printer, getTraversalStrides().asArrayRef());
+  printer << ", ";
+  printOptionalViewPaddingValue(printer, getPaddingValue());
+  printCudaTileType(printer, getTensorView());
+  printOptionalViewDimMap(printer, getDimMap());
+  printer << ">";
+}
+
+LogicalResult cuda_tile::StridedViewType::verify(
+    function_ref<InFlightDiagnostic()> emitError,
+    DenseI32ArrayAttr tileShapeAttr, DenseI32ArrayAttr traversalStridesAttr,
+    cuda_tile::TensorViewType tensorView, ArrayRef<int32_t> dimMap,
+    PaddingValueAttr paddingValue) {
+  if (failed(verifyPartitionViewLike(emitError, tileShapeAttr, tensorView,
+                                     dimMap, paddingValue)))
+    return failure();
+
+  if (tileShapeAttr.asArrayRef().size() !=
+      traversalStridesAttr.asArrayRef().size())
+    return emitError() << "expected " << tileShapeAttr.asArrayRef().size()
+                       << " traversal strides, got "
+                       << traversalStridesAttr.asArrayRef().size();
+
+  if (any_of(traversalStridesAttr.asArrayRef(),
+             [](int32_t dim) { return dim <= 0; }))
+    return emitError()
+           << "traversal strides must be strictly positive but got ["
+           << traversalStridesAttr.asArrayRef() << "]";
+
+  return success();
+}
+
+size_t cuda_tile::StridedViewType::getViewIndexRank() const {
+  return getTileShape().size();
+}
+
+Type cuda_tile::StridedViewType::getViewTileType() const {
+  SmallVector<int64_t> shape64(getTileShape().size());
+  llvm::transform(getTileShape().asArrayRef(), shape64.begin(),
+                  [](int32_t x) -> int64_t { return x; });
+  return cuda_tile::TileType::get(shape64, getTensorView().getElementType());
+}
+
+LogicalResult cuda_tile::StridedViewType::verifyIndices(
+    function_ref<InFlightDiagnostic()> emitError, TypeRange indexTypes) const {
+  if (indexTypes.empty())
+    return success();
+
+  // All indices must be scalar tiles.
+  for (Type t : indexTypes) {
+    auto tileType = dyn_cast<TileType>(t);
+    if (!tileType) {
+      return emitError() << "expected index type to be a tile type, got " << t;
+    }
+    if (tileType.getRank() != 0) {
+      return emitError() << "expected index type to be a scalar tile, got "
+                         << tileType;
+    }
+  }
+
+  // All indices must have the same type.
+  Type baseIndexType = indexTypes.front();
+  for (const auto &[i, indexType] : llvm::enumerate(indexTypes)) {
+    if (indexType != baseIndexType)
+      return emitError() << "expected index type " << i
+                         << " to be the same as other index types ("
+                         << baseIndexType << "), got " << indexType;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GatherScatterView Type
+//===----------------------------------------------------------------------===//
+
+Type cuda_tile::GatherScatterViewType::parse(AsmParser &parser) {
+  SMLoc loc = parser.getCurrentLocation();
+  SmallVector<int64_t> tileShape;
+
+  if (parser.parseLess())
+    return Type();
+
+  if (parser.parseKeyword("tile") || parser.parseEqual())
+    return Type();
+
+  SMLoc dimListLoc = parser.getCurrentLocation();
+  if (parser.parseLParen() ||
+      parser.parseDimensionList(tileShape, /*allowDynamic=*/false,
+                                /*withTrailingX=*/false) ||
+      parser.parseRParen() || parser.parseComma())
+    return Type();
+
+  FailureOr<PaddingValueAttr> paddingValue = parseOptionalPaddingValue(parser);
+  if (failed(paddingValue))
+    return Type();
+  else if (*paddingValue && parser.parseComma())
+    return Type();
+
+  Type parsedType;
+  if (parseCudaTileType(parser, parsedType))
+    return Type();
+  auto tensor_view = dyn_cast<TensorViewType>(parsedType);
+  if (!tensor_view) {
+    parser.emitError(parser.getCurrentLocation())
+        << "expected 'tensor_view' type, but got " << parsedType;
+    return Type();
+  }
+
+  uint32_t sparse_dim;
+  if (parser.parseComma() || parser.parseKeyword("sparse_dim") ||
+      parser.parseEqual())
+    return Type();
+
+  if (parser.parseInteger(sparse_dim))
+    return Type();
+
+  if (parser.parseGreater())
+    return Type();
+
+  SmallVector<int32_t> tileShape32;
+  for (auto [i, v] : llvm::enumerate(tileShape)) {
+    if (v <= 0 || v > std::numeric_limits<int32_t>::max()) {
+      parser.emitError(dimListLoc)
+          << "tile dimension " << i << " exceeds i32 limitations (got " << v
+          << ", expected strictly positive and less than or equal to "
+          << std::numeric_limits<int32_t>::max() << ")";
+      return Type();
+    }
+    tileShape32.push_back(static_cast<int32_t>(v));
+  }
+
+  return parser.getChecked<cuda_tile::GatherScatterViewType>(
+      loc, parser.getContext(),
+      DenseI32ArrayAttr::get(parser.getContext(), tileShape32), tensor_view,
+      sparse_dim, *paddingValue);
+}
+
+void cuda_tile::GatherScatterViewType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printer << "tile=(";
+  llvm::interleave(getTileShape().asArrayRef(), printer, "x");
+  printer << "), ";
+  if (getPaddingValue())
+    printer << "padding_value = "
+            << stringifyPaddingValue(getPaddingValue().getValue()) << ", ";
+
+  printCudaTileType(printer, getTensorView());
+
+  printer << ", sparse_dim=" << getSparseDim();
+
+  printer << ">";
+}
+
+LogicalResult cuda_tile::GatherScatterViewType::verify(
+    function_ref<InFlightDiagnostic()> emitError,
+    DenseI32ArrayAttr tileShapeAttr, cuda_tile::TensorViewType tensorView,
+    uint32_t sparse_dim, PaddingValueAttr paddingValue) {
+  ArrayRef<int32_t> tileShape = tileShapeAttr.asArrayRef();
+
+  if (tileShape.empty())
+    return emitError() << "0-dimension tile shape is not supported";
+
+  if (tileShape.size() != tensorView.getShape().size())
+    return emitError() << "expected tensor_view rank and tile rank "
+                          "to match, got tensor_view of rank "
+                       << tensorView.getShape().size() << " and tiles of rank "
+                       << tileShape.size();
+
+  if (tileShape.size() > std::numeric_limits<int32_t>::max())
+    return emitError() << "tile rank cannot be more than "
+                       << std::numeric_limits<int32_t>::max() << ", got "
+                       << tileShape.size();
+
+  if (any_of(tileShape, [](int32_t d) { return d <= 0; }))
+    return emitError()
+           << "tile shape dimensions must have positive length but got ["
+           << tileShape << "]";
+
+  if (any_of(tileShape, [](int32_t d) { return (d & (d - 1)) != 0; }))
+    return emitError()
+           << "tile shape dimensions must have power of two length but got ["
+           << tileShape << "]";
+
+  // Verify sparse_dim parameter
+  if (sparse_dim >= tensorView.getShape().size())
+    return emitError()
+           << "gather dimension is outside of tensor view dimensions, "
+              "expected strictly less than "
+           << tensorView.getShape().size() << ", got " << sparse_dim;
+
+  // Run the Tile type verifier to catch invalid tiles in the gather type
+  SmallVector<int64_t> shape64(tileShape.begin(), tileShape.end());
+  if (failed(cuda_tile::TileType::verify([&]() { return emitError(); }, shape64,
+                                         tensorView.getElementType())))
+    return failure();
+
+  // Verify that special padding values are only used with floating point types
+  if (paddingValue) {
+    switch (paddingValue.getValue()) {
+    default:
+      break;
+    case PaddingValue::neg_zero:
+    case PaddingValue::nan:
+    case PaddingValue::pos_inf:
+    case PaddingValue::neg_inf:
+      if (!llvm::isa<FloatType>(tensorView.getElementType()))
+        return emitError()
+               << "padding_value "
+               << stringifyPaddingValue(paddingValue.getValue())
+               << " can only be used with floating point element types, got "
+               << tensorView.getElementType();
+      break;
+    }
+  }
+
+  return success();
+}
+
+size_t cuda_tile::GatherScatterViewType::getViewIndexRank() const {
+  return getTileShape().size();
+}
+
+Type cuda_tile::GatherScatterViewType::getViewTileType() const {
+  SmallVector<int64_t> shape64(getTileShape().size());
+  llvm::transform(getTileShape().asArrayRef(), shape64.begin(),
+                  [](int32_t x) -> int64_t { return x; });
+  return cuda_tile::TileType::get(shape64, getTensorView().getElementType());
+}
+
+LogicalResult cuda_tile::GatherScatterViewType::verifyIndices(
+    function_ref<InFlightDiagnostic()> emitError, TypeRange indexTypes) const {
+  // For GatherScatterView, the index at position `sparse_dim` MUST be a 1D
+  // tensor (gather/scatter indices) while the rest MUST be scalar tiles.
+  if (indexTypes.empty())
+    return success();
+
+  uint32_t sparse_dim = getSparseDim();
+
+  // Verify sparse_dim is within index range
+  if (sparse_dim >= indexTypes.size())
+    return emitError() << "gather/scatter dimension " << sparse_dim
+                       << " is out of range for index count "
+                       << indexTypes.size();
+
+  // Verify index at sparse_dim position is a 1D tensor
+  auto gatherIndexTileType = dyn_cast<TileType>(indexTypes[sparse_dim]);
+  if (!gatherIndexTileType)
+    return emitError() << "expected index at sparse_dim position " << sparse_dim
+                       << " to be a tile type for GatherScatterView";
+
+  if (gatherIndexTileType.getShape().size() != 1)
+    return emitError() << "expected index at sparse_dim position " << sparse_dim
+                       << " to be a 1D tensor for GatherScatterView, got rank "
+                       << gatherIndexTileType.getShape().size();
+
+  // Verify that the gather/scatter index size matches the tile shape at the
+  // gather dimension
+  int64_t gatherIndexSize = gatherIndexTileType.getShape()[0];
+  int32_t tileSizeAtDim = getTileShape()[sparse_dim];
+  if (gatherIndexSize != tileSizeAtDim)
+    return emitError() << "expected gather/scatter index size ("
+                       << gatherIndexSize
+                       << ") to match tile shape at gather/scatter dimension "
+                       << sparse_dim << " (" << tileSizeAtDim << ")";
+
+  // Verify all other indices are scalar tiles and have the same type
+  Type baseScalarType;
+  for (size_t i = 0; i < indexTypes.size(); ++i) {
+    if (i == sparse_dim)
+      continue; // Skip the gather index
+
+    auto idxTileType = dyn_cast<TileType>(indexTypes[i]);
+    if (!idxTileType || !idxTileType.getShape().empty())
+      return emitError() << "expected index " << i
+                         << " to be a scalar tile for GatherScatterView";
+
+    if (!baseScalarType) {
+      baseScalarType = indexTypes[i];
+    } else if (indexTypes[i] != baseScalarType) {
+      return emitError() << "expected scalar index " << i
+                         << " to have the same type as other scalar indices ("
+                         << baseScalarType << "), got " << indexTypes[i];
+    }
+  }
+
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

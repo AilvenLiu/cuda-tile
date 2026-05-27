@@ -10,6 +10,12 @@ cuda_tile.module @kernels {
     %c_i8 = constant <i8: [1, 2, 3, 4]> : !cuda_tile.tile<4xi8>
     // CHECK: %[[bc_i8_i8:.*]] = bitcast %[[const_i8]] : tile<4xi8> -> tile<4xi8>
     %bc_i8_i8 = bitcast %c_i8 : tile<4xi8> -> tile<4xi8>
+    // CHECK: %[[bc_i8_f8e4m3fn:.*]] = bitcast %[[const_i8]] : tile<4xi8> -> tile<4xf8E4M3FN>
+    %bc_i8_f8e4m3fn = bitcast %c_i8 : tile<4xi8> -> tile<4xf8E4M3FN>
+    // CHECK: %[[bc_i8_f8e5m2:.*]] = bitcast %[[const_i8]] : tile<4xi8> -> tile<4xf8E5M2>
+    %bc_i8_f8e5m2 = bitcast %c_i8 : tile<4xi8> -> tile<4xf8E5M2>
+    // CHECK: %[[bc_i8_f8e8m0fnu:.*]] = bitcast %[[const_i8]] : tile<4xi8> -> tile<4xf8E8M0FNU>
+    %bc_i8_f8e8m0fnu = bitcast %c_i8 : tile<4xi8> -> tile<4xf8E8M0FNU>
 
     // **** 16-bit ****
     // i16 -> i16
@@ -125,7 +131,6 @@ cuda_tile.module @kernels {
     %c5_f32 = constant <f32: 5.0> : !cuda_tile.tile<f32>
     // CHECK: %[[c5_f64:.*]] = constant <f64: 5.000000e+00> : tile<f64>
     %c5_f64 = constant <f64: 5.0> : !cuda_tile.tile<f64>
-
     // CHECK: %[[c_tensor_f16:.*]] = constant <f16: {{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tile<2x2xf16>
     %c_tensor_f16 = constant <f16: [[1.0, 2.0], [3.0, 4.0]]> : !cuda_tile.tile<2x2xf16>
     // CHECK: %[[c_tensor_bf16:.*]] = constant <bf16: {{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tile<2x2xbf16>
@@ -134,46 +139,92 @@ cuda_tile.module @kernels {
     %c_tensor_f32 = constant <f32: [[1.0, 2.0], [3.0, 4.0]]> : !cuda_tile.tile<2x2xf32>
     // CHECK: %[[c_tensor_f64:.*]] = constant <f64: {{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tile<2x2xf64>
     %c_tensor_f64 = constant <f64: [[1.0, 2.0], [3.0, 4.0]]> : !cuda_tile.tile<2x2xf64>
+    // CHECK: %[[c_f4e2m1fn_tensor:.*]] = constant <f4E2M1FN: [1.000000e+00, 2.000000e+00]> : tile<2xf4E2M1FN>
+    %c_f4e2m1fn_tensor = constant <f4E2M1FN: [1.0, 2.0]> : !cuda_tile.tile<2xf4E2M1FN>
+    // CHECK: %[[c_f8e4m3fn_tensor:.*]] = constant <f8E4M3FN: [1.000000e+00, 2.000000e+00]> : tile<2xf8E4M3FN>
+    %c_f8e4m3fn_tensor = constant <f8E4M3FN: [1.0, 2.0]> : !cuda_tile.tile<2xf8E4M3FN>
+    // CHECK: %[[c_f8e5m2_tensor:.*]] = constant <f8E5M2: [1.000000e+00, 2.000000e+00]> : tile<2xf8E5M2>
+    %c_f8e5m2_tensor = constant <f8E5M2: [1.0, 2.0]> : !cuda_tile.tile<2xf8E5M2>
+    // CHECK: %[[c_f8e8m0fnu_tensor:.*]] = constant <f8E8M0FNU: [1.000000e+00, 2.000000e+00]> : tile<2xf8E8M0FNU>
+    %c_f8e8m0fnu_tensor = constant <f8E8M0FNU: [1.0, 2.0]> : !cuda_tile.tile<2xf8E8M0FNU>
+
+    // **** f4 input ****
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xf8E4M3FN>
+    %ftof_f4_f8e4m3 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xf8E4M3FN>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xf8E5M2>
+    %ftof_f4_f8e5m2 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xf8E5M2>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xbf16>
+    %ftof_f4_bf16 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xbf16>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xf16>
+    %ftof_f4_f16 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xf16>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xf32>
+    %ftof_f4_f32 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xf32>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] : tile<2xf4E2M1FN> -> tile<2xf64>
+    %ftof_f4_f64 = ftof %c_f4e2m1fn_tensor : tile<2xf4E2M1FN> -> tile<2xf64>
+
+    // **** f8 input ****
+    // CHECK: ftof %[[c_f8e4m3fn_tensor]] : tile<2xf8E4M3FN> -> tile<2xf16>
+    %ftof_f8e4m3fn_f16 = ftof %c_f8e4m3fn_tensor : tile<2xf8E4M3FN> -> tile<2xf16>
+    // CHECK: ftof %[[c_f8e5m2_tensor]] : tile<2xf8E5M2> -> tile<2xf16>
+    %ftof_f8e5m2_f16 = ftof %c_f8e5m2_tensor : tile<2xf8E5M2> -> tile<2xf16>
+    // CHECK: ftof %[[c_f8e8m0fnu_tensor]] : tile<2xf8E8M0FNU> -> tile<2xf16>
+    %ftof_f8e8m0fnu_f16 = ftof %c_f8e8m0fnu_tensor : tile<2xf8E8M0FNU> -> tile<2xf16>
+
     // **** f16 input ****
     // CHECK: ftof %[[c5_f16]] : tile<f16> -> tile<bf16>
-    %ftof_f16_bf16_s = ftof %c5_f16 : tile<f16> -> tile<bf16>
+    %ftof_f16_bf16 = ftof %c5_f16 : tile<f16> -> tile<bf16>
     // CHECK: ftof %[[c5_f16]] : tile<f16> -> tile<f32>
-    %ftof_f16_f32_s = ftof %c5_f16 : tile<f16> -> tile<f32>
+    %ftof_f16_f32 = ftof %c5_f16 : tile<f16> -> tile<f32>
     // CHECK: ftof %[[c5_f16]] : tile<f16> -> tile<f64>
-    %ftof_f16_f64_s = ftof %c5_f16 : tile<f16> -> tile<f64>
+    %ftof_f16_f64 = ftof %c5_f16 : tile<f16> -> tile<f64>
     // CHECK: ftof %[[c_tensor_f16]] : tile<2x2xf16> -> tile<2x2xf32>
     %ftof_f16_f32_t = ftof %c_tensor_f16 : tile<2x2xf16> -> tile<2x2xf32>
+    // CHECK: ftof %[[c_tensor_f16]] : tile<2x2xf16> -> tile<2x2xf4E2M1FN>
+    %ftof_f16_f4e2m1fn = ftof %c_tensor_f16 : tile<2x2xf16> -> tile<2x2xf4E2M1FN>
+    // CHECK: ftof %[[c_tensor_f16]] rounding<zero> : tile<2x2xf16> -> tile<2x2xf8E8M0FNU>
+    %ftof_f16_f8e8m0fnu_zero = ftof %c_tensor_f16 rounding<zero> : tile<2x2xf16> -> tile<2x2xf8E8M0FNU>
+    // CHECK: ftof %[[c_tensor_f16]] rounding<positive_inf> : tile<2x2xf16> -> tile<2x2xf8E8M0FNU>
+    %ftof_f16_f8e8m0fnu_positive_inf = ftof %c_tensor_f16 rounding<positive_inf> : tile<2x2xf16> -> tile<2x2xf8E8M0FNU>
+
     // **** bf16 input ****
     // CHECK: ftof %[[c5_bf16]] : tile<bf16> -> tile<f16>
-    %ftof_bf16_f16_s = ftof %c5_bf16 : tile<bf16> -> tile<f16>
+    %ftof_bf16_f16 = ftof %c5_bf16 : tile<bf16> -> tile<f16>
     // CHECK: ftof %[[c5_bf16]] : tile<bf16> -> tile<f32>
-    %ftof_bf16_f32_s = ftof %c5_bf16 : tile<bf16> -> tile<f32>
+    %ftof_bf16_f32 = ftof %c5_bf16 : tile<bf16> -> tile<f32>
     // CHECK: ftof %[[c5_bf16]] : tile<bf16> -> tile<f64>
-    %ftof_bf16_f64_s = ftof %c5_bf16 : tile<bf16> -> tile<f64>
+    %ftof_bf16_f64 = ftof %c5_bf16 : tile<bf16> -> tile<f64>
     // CHECK: ftof %[[c_tensor_bf16]] : tile<2x2xbf16> -> tile<2x2xf32>
     %ftof_bf16_f32_t = ftof %c_tensor_bf16 : tile<2x2xbf16> -> tile<2x2xf32>
+    // CHECK: ftof %[[c_tensor_bf16]] : tile<2x2xbf16> -> tile<2x2xf4E2M1FN>
+    %ftof_bf16_f4e2m1fn = ftof %c_tensor_bf16 : tile<2x2xbf16> -> tile<2x2xf4E2M1FN>
+
     // **** f32 input ****
     // CHECK: ftof %[[c5_f32]] : tile<f32> -> tile<f16>
-    %ftof_f32_f16_s = ftof %c5_f32 : tile<f32> -> tile<f16>
+    %ftof_f32_f16 = ftof %c5_f32 : tile<f32> -> tile<f16>
     // CHECK: ftof %[[c5_f32]] : tile<f32> -> tile<bf16>
-    %ftof_f32_bf16_s = ftof %c5_f32 : tile<f32> -> tile<bf16>
+    %ftof_f32_bf16 = ftof %c5_f32 : tile<f32> -> tile<bf16>
     // CHECK: ftof %[[c5_f32]] : tile<f32> -> tile<f64>
-    %ftof_f32_f64_s = ftof %c5_f32 : tile<f32> -> tile<f64>
+    %ftof_f32_f64 = ftof %c5_f32 : tile<f32> -> tile<f64>
     // CHECK: ftof %[[c_tensor_f32]] : tile<2x2xf32> -> tile<2x2xf16>
     %ftof_f32_f16_t = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xf16>
     // CHECK: ftof %[[c_tensor_f32]] : tile<2x2xf32> -> tile<2x2xbf16>
     %ftof_f32_bf16_t = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xbf16>
     // CHECK: ftof %[[c_tensor_f32]] : tile<2x2xf32> -> tile<2x2xf64>
     %ftof_f32_f64_t = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xf64>
+    // CHECK: ftof %[[c_tensor_f32]] : tile<2x2xf32> -> tile<2x2xf4E2M1FN>
+    %ftof_f32_f4e2m1fn = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xf4E2M1FN>
+
     // **** f64 input ****
     // CHECK: ftof %[[c5_f64]] : tile<f64> -> tile<f16>
-    %ftof_f64_f16_s = ftof %c5_f64 : tile<f64> -> tile<f16>
+    %ftof_f64_f16 = ftof %c5_f64 : tile<f64> -> tile<f16>
     // CHECK: ftof %[[c5_f64]] : tile<f64> -> tile<bf16>
-    %ftof_f64_bf16_s = ftof %c5_f64 : tile<f64> -> tile<bf16>
+    %ftof_f64_bf16 = ftof %c5_f64 : tile<f64> -> tile<bf16>
     // CHECK: ftof %[[c5_f64]] : tile<f64> -> tile<f32>
-    %ftof_f64_f32_s = ftof %c5_f64 : tile<f64> -> tile<f32>
+    %ftof_f64_f32 = ftof %c5_f64 : tile<f64> -> tile<f32>
     // CHECK: ftof %[[c_tensor_f64]] : tile<2x2xf64> -> tile<2x2xf32>
     %ftof_f64_f32_t = ftof %c_tensor_f64 : tile<2x2xf64> -> tile<2x2xf32>
+    // CHECK: ftof %[[c_tensor_f64]] : tile<2x2xf64> -> tile<2x2xf4E2M1FN>
+    %ftof_f64_f4e2m1fn = ftof %c_tensor_f64 : tile<2x2xf64> -> tile<2x2xf4E2M1FN>
   }
 
   cuda_tile.entry @ftoi() {
@@ -186,6 +237,26 @@ cuda_tile.module @kernels {
     %c_tensor_f32 = constant <f32: [[1.0, 2.0], [3.0, 4.0]]> : !cuda_tile.tile<2x2xf32>
     // CHECK: %[[c5_f64:.*]] = constant <f64: 5.000000e+00> : tile<f64>
     %c5_f64 = constant <f64: 5.0> : !cuda_tile.tile<f64>
+    // CHECK: %[[c_f8e4m3fn_tensor:.*]] = constant <f8E4M3FN: [1.000000e+00, 2.000000e+00]> : tile<2xf8E4M3FN>
+    %c_f8e4m3fn_tensor = constant <f8E4M3FN: [1.0, 2.0]> : !cuda_tile.tile<2xf8E4M3FN>
+    // CHECK: %[[c_f8e5m2_tensor:.*]] = constant <f8E5M2: [1.000000e+00, 2.000000e+00]> : tile<2xf8E5M2>
+    %c_f8e5m2_tensor = constant <f8E5M2: [1.0, 2.0]> : !cuda_tile.tile<2xf8E5M2>
+    // CHECK: %[[c_f8e8m0fnu_tensor:.*]] = constant <f8E8M0FNU: [1.000000e+00, 2.000000e+00]> : tile<2xf8E8M0FNU>
+    %c_f8e8m0fnu_tensor = constant <f8E8M0FNU: [1.0, 2.0]> : !cuda_tile.tile<2xf8E8M0FNU>
+
+    // **** f8 input ****
+    // CHECK: ftoi %[[c_f8e4m3fn_tensor]] signed : tile<2xf8E4M3FN> -> tile<2xi16>
+    %ftoi_f8e4m3fn_i16_s = ftoi %c_f8e4m3fn_tensor signed : tile<2xf8E4M3FN> -> tile<2xi16>
+    // CHECK: ftoi %[[c_f8e5m2_tensor]] signed : tile<2xf8E5M2> -> tile<2xi16>
+    %ftoi_f8e5m2_i16_s = ftoi %c_f8e5m2_tensor signed : tile<2xf8E5M2> -> tile<2xi16>
+    // CHECK: ftoi %[[c_f8e8m0fnu_tensor]] signed : tile<2xf8E8M0FNU> -> tile<2xi16>
+    %ftoi_f8e8m0fnu_i16_s = ftoi %c_f8e8m0fnu_tensor signed : tile<2xf8E8M0FNU> -> tile<2xi16>
+    // CHECK: ftoi %[[c_f8e4m3fn_tensor]] unsigned : tile<2xf8E4M3FN> -> tile<2xi16>
+    %ftoi_f8e4m3fn_i16_u = ftoi %c_f8e4m3fn_tensor unsigned : tile<2xf8E4M3FN> -> tile<2xi16>
+    // CHECK: ftoi %[[c_f8e5m2_tensor]] unsigned : tile<2xf8E5M2> -> tile<2xi16>
+    %ftoi_f8e5m2_i16_u = ftoi %c_f8e5m2_tensor unsigned : tile<2xf8E5M2> -> tile<2xi16>
+    // CHECK: ftoi %[[c_f8e8m0fnu_tensor]] unsigned : tile<2xf8E8M0FNU> -> tile<2xi16>
+    %ftoi_f8e8m0fnu_i16_u = ftoi %c_f8e8m0fnu_tensor unsigned : tile<2xf8E8M0FNU> -> tile<2xi16>
 
     // **** f16 input ****
     // CHECK: ftoi %[[c5_f16]] signed : tile<f16> -> tile<i1>
