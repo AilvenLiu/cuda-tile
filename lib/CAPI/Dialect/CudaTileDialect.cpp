@@ -102,15 +102,15 @@ MlirType mlirCudaTileTileTypeGetChecked(MlirContext ctx, intptr_t rank,
 //===----------------------------------------------------------------------===//
 
 bool mlirCudaTileTypeIsATokenType(MlirType type) {
-  return isa<TokenType>(unwrap(type));
+  return isa<cuda_tile::TokenType>(unwrap(type));
 }
 
 MlirTypeID mlirCudaTileTokenTypeGetTypeID(void) {
-  return wrap(TokenType::getTypeID());
+  return wrap(cuda_tile::TokenType::getTypeID());
 }
 
 MlirType mlirCudaTileTokenTypeGet(MlirContext ctx) {
-  return wrap(TokenType::get(unwrap(ctx)));
+  return wrap(cuda_tile::TokenType::get(unwrap(ctx)));
 }
 
 //===----------------------------------------------------------------------===//

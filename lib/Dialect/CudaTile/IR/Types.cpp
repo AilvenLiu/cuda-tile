@@ -88,6 +88,14 @@ parseOptionalPaddingValue(AsmParser &parser) {
 
 /// Parse a type, if type is unprefixed, assume it is from the cuda_tile dialect
 ParseResult cuda_tile::parseCudaTileType(AsmParser &p, Type &type) {
+  // The MLIR builtin dialect now provides a `token` type whose spelling
+  // collides with the cuda_tile `token` mnemonic. Make sure we parse
+  // the token as the cuda_tile token type.
+  if (succeeded(p.parseOptionalKeyword(cuda_tile::TokenType::getMnemonic()))) {
+    type = cuda_tile::TokenType::get(p.getContext());
+    return success();
+  }
+
   auto result = p.parseOptionalType(type);
   if (result.has_value())
     return *result;

@@ -3693,10 +3693,11 @@ ParseResult finalizeViewTkoParse(
                              result.operands))
     return failure();
 
-  if (hasToken &&
-      parser.resolveOperand(token, TokenType::get(parser.getContext()),
-                            result.operands))
+  if (hasToken && parser.resolveOperand(
+                      token, cuda_tile::TokenType::get(parser.getContext()),
+                      result.operands)) {
     return failure();
+  }
 
   // Set attributes
   result.addAttribute("memory_ordering_semantics", memSemantics);
@@ -3876,9 +3877,9 @@ ParseResult cuda_tile::AtomicRedViewTkoOp::parse(OpAsmParser &parser,
   if (parser.resolveOperand(value, valueType, result.operands)) {
     return failure();
   }
-  if (hasToken &&
-      parser.resolveOperand(token, TokenType::get(parser.getContext()),
-                            result.operands)) {
+  if (hasToken && parser.resolveOperand(
+                      token, cuda_tile::TokenType::get(parser.getContext()),
+                      result.operands)) {
     return failure();
   }
 
