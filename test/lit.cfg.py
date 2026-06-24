@@ -10,7 +10,10 @@ from lit.llvm import llvm_config
 # name: The name of this test suite
 config.name = "CUDA_TILE"
 
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+# Use lit's internal shell. external-shell execution (execute_external=True)
+# was deprecated in LLVM-23 and ShTest now rejects it; all CUDA Tile tests
+# use standard lit constructs that the internal shell supports.
+config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
 config.suffixes = [".mlir", ".c", ".py"]
