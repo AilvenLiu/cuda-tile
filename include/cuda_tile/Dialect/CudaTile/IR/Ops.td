@@ -4284,7 +4284,8 @@ def CudaTile_ShLIOp : CudaTileIntegerOpDef<"shli", "13.1",
     .. math::
       \text{shli}(x, y)_i = x_i \ll y_i
 
-    The :code:`rhs` operand is interpreted as an unsigned integer.
+    The shift amount is specified by the unsigned 32-bit value of the
+    :code:`rhs` operand.
   }], integer_arith_suffix);
 
   let arguments = (ins CudaTileArg<CudaTile_IntTileType, "The left hand side operand.", "13.1">:$lhs,
@@ -4314,7 +4315,8 @@ def CudaTile_ShRIOp : CudaTileIntegerOpDef<"shri", "13.1",
     are zero-filled; when :code:`signed`, the higher-order bits are filled with
     the sign bit.
 
-    The :code:`rhs` operand is always interpreted as an unsigned integer.
+    The shift amount is specified by the unsigned 32-bit value of the
+    :code:`rhs` operand.
   }], integer_arith_suffix);
 
   let arguments = (ins CudaTileArg<CudaTile_IntTileType, "The left hand side operand.", "13.1">:$lhs,
