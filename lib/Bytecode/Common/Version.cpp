@@ -45,7 +45,7 @@ const BytecodeVersion BytecodeVersion::kCurrentCompatibilityVersion = {
 /// The current version of the bytecode format.
 const BytecodeVersion BytecodeVersion::kCurrentVersion = {
     /*verMajor=*/13,
-    /*verMinor=*/3,
+    /*verMinor=*/4,
     /*verTag=*/0,
 };
 
@@ -56,10 +56,25 @@ const BytecodeVersion BytecodeVersion::kUnifiedBitfieldVersion = {
     /*verTag=*/0,
 };
 
+/// The version starting from which bits 3-4 of the function-table entry flag
+/// byte are meaningful. Older bytecode treats them as reserved.
+const BytecodeVersion BytecodeVersion::kFunctionFlagsExtendedVersion = {
+    /*verMajor=*/13,
+    /*verMinor=*/4,
+    /*verTag=*/0,
+};
+
 /// The lowest supported version of the bytecode format.
 const BytecodeVersion BytecodeVersion::kMinSupportedVersion = {
     /*verMajor=*/13,
     /*verMinor=*/1,
+    /*verTag=*/0,
+};
+
+/// The version when the canonical i1 bit-packed encoding was introduced.
+const BytecodeVersion BytecodeVersion::kCanonicalI1Version = {
+    /*verMajor=*/13,
+    /*verMinor=*/4,
     /*verTag=*/0,
 };
 
@@ -71,8 +86,9 @@ bool mlir::cuda_tile::detail::isOpcodeAvailableInVersion(
     uint32_t opcode, const BytecodeVersion &version) {
   auto it = getVersionToMaxOpcodeMap().find(
       std::make_pair(version.getMajor(), version.getMinor()));
-  if (it == getVersionToMaxOpcodeMap().end())
+  if (it == getVersionToMaxOpcodeMap().end()) {
     return false;
+  }
   return opcode <= it->second;
 }
 

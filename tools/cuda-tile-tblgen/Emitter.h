@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
 // This file defines helpers used in the CUDA Tile dialect spec generator.
 //
 //===----------------------------------------------------------------------===//

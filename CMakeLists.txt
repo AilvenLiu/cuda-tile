@@ -50,6 +50,17 @@ if(MSVC)
   string(APPEND CMAKE_CUDA_FLAGS " -Xcompiler /bigobj")
 endif()
 
+# Reserve 64 MiB of stack for standalone cross-compile host tools. This build
+# skips LLVM's HandleLLVMOptions.cmake, leaving cuda-tile-tblgen with MSVC's
+# small default stack and prone to failure on recursive TableGen inputs. Match
+# LLVM's Windows stack setting, raised for the same class of failure in
+# Bug 5680414.
+if(MSVC AND LLVM_TARGET_IS_CROSSCOMPILE_HOST AND
+   NOT CUDA_TILE_BUILD_IN_LLVM)
+  string(APPEND CMAKE_EXE_LINKER_FLAGS
+    " ${CMAKE_CXX_LINKER_WRAPPER_FLAG}/STACK:67108864")
+endif()
+
 # ------------------------------------------------------------------------------
 # TEMPORARY HACKS!
 # ------------------------------------------------------------------------------
@@ -168,14 +179,28 @@ set(CUDA_TILE_LIBRARY_DIR ${LLVM_LIBRARY_OUTPUT_INTDIR})
 # anything else.
 add_subdirectory(tools/cuda-tile-tblgen)
 
-# The CMake in 'tools/cuda-tile-tblgen' defines CUDA_TILE_TABLEGEN_EXE to a
-# default 'cuda-tile-tblgen'. We need to include the full path of the host
-# executable.
+# Ensure tablegen executable paths include .exe on Windows.
+set(_CUDA_TILE_TBLGEN_HOST_EXE_SUFFIX "${CMAKE_HOST_EXECUTABLE_SUFFIX}")
+if((CMAKE_HOST_WIN32 OR WIN32 OR CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+   AND _CUDA_TILE_TBLGEN_HOST_EXE_SUFFIX STREQUAL "")
+  set(_CUDA_TILE_TBLGEN_HOST_EXE_SUFFIX ".exe")
+endif()
+
 if(CMAKE_CROSSCOMPILING)
   get_native_tool_path(cuda-tile-tblgen CUDA_TILE_TABLEGEN_EXE)
-  set(MLIR_TABLEGEN_EXE "${CUDA_TILE_USE_NATIVE_LLVM_INSTALL_DIR}/bin/${MLIR_TABLEGEN_EXE}")
+  if(NOT CUDA_TILE_TABLEGEN_EXE MATCHES "\\.exe$")
+    set(CUDA_TILE_TABLEGEN_EXE "${CUDA_TILE_TABLEGEN_EXE}${_CUDA_TILE_TBLGEN_HOST_EXE_SUFFIX}")
+  endif()
+  set(_MLIR_TBLGEN_HOST_EXE_SUFFIX "${CMAKE_HOST_EXECUTABLE_SUFFIX}")
+  if((CMAKE_HOST_WIN32 OR WIN32 OR CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+     AND _MLIR_TBLGEN_HOST_EXE_SUFFIX STREQUAL "")
+    set(_MLIR_TBLGEN_HOST_EXE_SUFFIX ".exe")
+  endif()
+  set(MLIR_TABLEGEN_EXE
+      "${CUDA_TILE_USE_NATIVE_LLVM_INSTALL_DIR}/bin/${MLIR_TABLEGEN_EXE}${_MLIR_TBLGEN_HOST_EXE_SUFFIX}")
 else()
-  set(CUDA_TILE_TABLEGEN_EXE ${CUDA_TILE_BINARY_DIR}/bin/cuda-tile-tblgen)
+  set(CUDA_TILE_TABLEGEN_EXE
+      "${CUDA_TILE_BINARY_DIR}/bin/cuda-tile-tblgen${CMAKE_EXECUTABLE_SUFFIX}")
 endif()
 
 message(STATUS "CUDA_TILE_TABLEGEN_EXE: ${CUDA_TILE_TABLEGEN_EXE}")

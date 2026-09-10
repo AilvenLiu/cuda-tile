@@ -15,12 +15,16 @@
 #include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
 
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/Verifier.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "../BytecodeEnums.h"
 #include "../Common/VersionUtils.h"
+#include "cuda_tile/Bytecode/Common/BytecodeVerification.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Attributes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Types.h"
@@ -77,8 +81,9 @@ public:
     do {
       uint8_t byte = value & 0x7F; // Lower 7 bits
       value >>= 7;
-      if (value != 0)
+      if (value != 0) {
         byte |= 0x80; // Set continuation bit
+      }
       bytes[index++] = byte;
     } while (value != 0 && index < sizeof(bytes));
 
@@ -103,15 +108,17 @@ public:
     for (size_t i = 0; i < sizeof(T); ++i) {
       writeByte(value & 0xFF);
       // Only shift if there are more bytes to process
-      if (sizeof(T) > 1 && i < sizeof(T) - 1)
+      if (sizeof(T) > 1 && i < sizeof(T) - 1) {
         value >>= 8;
+      }
     }
   }
 
   template <typename T>
   void writeLE(ArrayRef<T> values) {
-    for (T value : values)
+    for (T value : values) {
       writeLE<T>(value);
+    }
   }
 
   template <typename T>
@@ -142,12 +149,14 @@ public:
 
   void alignTo(uint64_t alignment,
                uint8_t paddingByte = Bytecode::kAlignmentByte) {
-    if (alignment < 2)
+    if (alignment < 2) {
       return;
+    }
     uint64_t currentPos = tell();
     uint64_t padding = (alignment - (currentPos % alignment)) % alignment;
-    for (uint64_t i = 0; i < padding; ++i)
+    for (uint64_t i = 0; i < padding; ++i) {
       writeByte(paddingByte);
+    }
     // Update the required alignment
     requiredAlignment = std::max(requiredAlignment, alignment);
   }
@@ -200,8 +209,9 @@ static void writeSectionHeader(raw_ostream &stream, uint8_t sectionID,
                                uint64_t length, uint64_t alignment) {
   EncodingWriter writer(stream);
   uint8_t idAndIsAligned = sectionID & 0x7F;
-  if (alignment > 1)
+  if (alignment > 1) {
     idAndIsAligned |= 0x80;
+  }
   writer.writeByte(idAndIsAligned);
   writer.writeVarInt(length);
   if (alignment > 1) {
@@ -221,8 +231,9 @@ static void writeAPInt(const APInt &apInt, EncodingWriter &writer) {
     unsigned numActiveWords = apInt.getActiveWords();
     writer.writeVarInt(numActiveWords);
     const uint64_t *rawValueData = apInt.getRawData();
-    for (unsigned i = 0; i < numActiveWords; ++i)
+    for (unsigned i = 0; i < numActiveWords; ++i) {
       writer.writeSignedVarInt(rawValueData[i]);
+    }
   }
 }
 
@@ -245,8 +256,9 @@ namespace {
 struct StringManager {
   uint64_t getStringIndex(StringRef str) {
     auto it = stringIndexMap.find(str);
-    if (it != stringIndexMap.end())
+    if (it != stringIndexMap.end()) {
       return it->second;
+    }
     uint64_t index = stringIndexMap.size();
     stringIndexMap[str] = index;
     return index;
@@ -265,8 +277,9 @@ struct StringManager {
     auto offsetsPtr = sectionWriter.tell();
 
     // Reserve space for the offset table (filled later).
-    for (size_t i = 0; i < stringIndexMap.size(); ++i)
+    for (size_t i = 0; i < stringIndexMap.size(); ++i) {
       sectionWriter.writeLE<uint32_t>(0);
+    }
 
     // Write each string and record its starting offset.
     SmallVector<uint32_t> finalOffsets;
@@ -325,17 +338,34 @@ private:
 //   resultTypeIndices[varint*numResults]
 //
 namespace {
+struct ConstantManager;
+struct FunctionTableWriter;
+
 struct TypeManager {
 public:
-  TypeManager(const BytecodeWriterConfig &config) : config(config) {}
+  TypeManager(const BytecodeWriterConfig &config, StringManager &strMgr)
+      : config(config), strMgr(strMgr) {}
+
+  void setConstantManager(ConstantManager &manager) { constMgr = &manager; }
+  void setFunctionWriter(FunctionTableWriter *writer) { funcWriter = writer; }
+
+  /// Returns the MLIRContext captured from the first registered type, or
+  /// nullptr if no types have been registered yet. Used by error paths that
+  /// lack an operation handle (e.g. when serializing attrs nested in type
+  /// payloads).
+  MLIRContext *getContext() const { return cachedContext; }
 
   // Gets or creates an index for a type in the type table.
   uint64_t getTypeIndex(Type type) {
+    if (!cachedContext) {
+      cachedContext = type.getContext();
+    }
     // Use the type's memory address as a unique key for lookup
     const void *key = type.getAsOpaquePointer();
     auto it = typeIndexMap.find(key);
-    if (it != typeIndexMap.end())
+    if (it != typeIndexMap.end()) {
       return it->second;
+    }
     // Ensure dependent/nested types are registered before the type itself
     registerDependentTypes(type);
     uint64_t index = typeList.size();
@@ -358,8 +388,9 @@ public:
     auto offsetsPtr = sectionWriter.tell();
 
     // Reserve space for the offset table (filled later).
-    for (size_t i = 0; i < typeList.size(); ++i)
+    for (size_t i = 0; i < typeList.size(); ++i) {
       sectionWriter.writeLE<uint32_t>(0);
+    }
 
     // Write each type and record its starting offset.
     SmallVector<uint32_t> finalOffsets;
@@ -369,8 +400,9 @@ public:
     for (Type type : typeList) {
       finalOffsets.push_back(running);
       auto before = sectionWriter.tell();
-      if (failed(serializeType(type, sectionWriter)))
+      if (failed(serializeType(type, sectionWriter))) {
         return failure();
+      }
       running += static_cast<uint32_t>(sectionWriter.tell() - before);
     }
 
@@ -411,41 +443,92 @@ private:
     uint64_t numInputs = type.getNumInputs();
     writer.writeVarInt(numInputs);
     // Serialize input types
-    for (Type input : type.getInputs())
-      if (failed(writeTypeIndex(input, writer)))
+    for (Type input : type.getInputs()) {
+      if (failed(writeTypeIndex(input, writer))) {
         return failure();
+      }
+    }
     // Using VarInt for numResults per spec
     uint64_t numResults = type.getNumResults();
     writer.writeVarInt(numResults);
     // Serialize result types
-    for (Type result : type.getResults())
-      if (failed(writeTypeIndex(result, writer)))
+    for (Type result : type.getResults()) {
+      if (failed(writeTypeIndex(result, writer))) {
         return failure();
+      }
+    }
     return success();
   }
+
+  LogicalResult writeSelfContainedTypeAttribute(Attribute attrValue,
+                                                EncodingWriter &writer);
 
   // Helper to recursively register dependent types before the main type.
   void registerDependentTypes(Type type) {
     // Check if the type itself is already registered or being registered
-    if (typeIndexMap.count(type.getAsOpaquePointer()))
+    if (typeIndexMap.count(type.getAsOpaquePointer())) {
       return;
+    }
 
-      // Auto-generated dependent type registration for CudaTile types.
+    // Auto-generated dependent type registration for CudaTile types.
 #define GEN_DEPENDENT_TYPE_REGISTRATION
 #include "TypeBytecode.inc"
 
     // FunctionType is not a CudaTile type, handle it manually.
     if (auto funcType = dyn_cast<FunctionType>(type)) {
-      for (Type input : funcType.getInputs())
+      for (Type input : funcType.getInputs()) {
         getTypeIndex(input);
-      for (Type result : funcType.getResults())
+      }
+      for (Type result : funcType.getResults()) {
         getTypeIndex(result);
+      }
     }
+  }
+
+  // Helper to recursively register any types referenced by a given attribute.
+  void registerDependentAttributeTypes(Attribute attr) {
+    if (!attr) {
+      return;
+    }
+    if (!visitedAttrs.insert(attr).second) {
+      return;
+    }
+
+    // MLIR builtin attrs that carry types or contain other attributes.
+    if (auto typeAttr = dyn_cast<TypeAttr>(attr)) {
+      getTypeIndex(typeAttr.getValue());
+      return;
+    }
+    if (auto denseAttr = dyn_cast<DenseElementsAttr>(attr)) {
+      getTypeIndex(denseAttr.getType());
+      return;
+    }
+    if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+      for (Attribute elementAttr : arrayAttr) {
+        registerDependentAttributeTypes(elementAttr);
+      }
+      return;
+    }
+    if (auto dictAttr = dyn_cast<DictionaryAttr>(attr)) {
+      for (NamedAttribute namedAttr : dictAttr) {
+        registerDependentAttributeTypes(namedAttr.getValue());
+      }
+      return;
+    }
+
+    // Auto-generated dispatch for CudaTile attrs with type-bearing parameters.
+#define GEN_DEPENDENT_ATTR_TYPE_REGISTRATION
+#include "AttrBytecode.inc"
   }
 
   llvm::MapVector<const void *, uint64_t> typeIndexMap;
   SmallVector<Type> typeList;
   const BytecodeWriterConfig &config;
+  StringManager &strMgr;
+  ConstantManager *constMgr = nullptr;
+  FunctionTableWriter *funcWriter = nullptr;
+  MLIRContext *cachedContext = nullptr;
+  llvm::DenseSet<Attribute> visitedAttrs;
 };
 } // end anonymous namespace
 
@@ -463,6 +546,9 @@ private:
 //
 namespace {
 struct ConstantManager {
+  explicit ConstantManager(const BytecodeWriterConfig &config)
+      : config(config) {}
+
   LogicalResult addConstant(Attribute attr, uint64_t &index) {
     auto it = constantsMap.find(attr);
     if (it != constantsMap.end()) {
@@ -472,9 +558,10 @@ struct ConstantManager {
     SmallVector<char> data;
     llvm::raw_svector_ostream dataStream(data);
     EncodingWriter writer(dataStream);
-    if (failed(serializeAttribute(attr, writer)))
+    if (failed(serializeAttribute(attr, writer))) {
       return emitError(UnknownLoc::get(attr.getContext()),
                        "failed to serialize attribute");
+    }
     index = constantsMap.size();
     constantsMap[attr] = std::move(data);
     return success();
@@ -500,15 +587,18 @@ struct ConstantManager {
   /// and dense element attributes suitable for the constant pool.
   LogicalResult serializeAttribute(Attribute attr, EncodingWriter &writer) {
     if (auto denseAttr = dyn_cast<DenseElementsAttr>(attr)) {
-      // i1 dense attributes use a fixed encoding so the bytes don't depend
-      // on whichever MLIR version is linked at build time. Upstream MLIR's
-      // getRawData() for i1 has shifted between bit-packed and one-byte-per-
-      // element across LLVM revisions. The wire format is: a splat is a
-      // single byte (0xff true / 0x00 false); a non-splat is bit-packed,
-      // ceil(N/8) bytes, element i in bit (i % 8) of byte (i / 8).
+      // i1 dense attributes use a canonical bit-packed encoding so the
+      // bytes don't depend on whichever MLIR version is linked at build
+      // time. Upstream MLIR's `getRawData()` for i1 has shifted between
+      // bit-packed and one-byte-per-element across LLVM revisions; both
+      // forms appear in legacy bytecode. We pick bit-packed as the
+      // forever-canonical wire format for v13.4+ and unpack inside the
+      // reader.
       auto tileType = dyn_cast<cuda_tile::TileType>(denseAttr.getType());
       if (tileType && tileType.getElementType().isInteger(1)) {
-        if (denseAttr.isSplat()) {
+        if (config.bytecodeVersion <
+                cuda_tile::BytecodeVersion::kCanonicalI1Version &&
+            denseAttr.isSplat()) {
           char b = denseAttr.getSplatValue<bool>() ? static_cast<char>(0xff)
                                                    : static_cast<char>(0x00);
           writer.writeVarInt(1);
@@ -516,11 +606,12 @@ struct ConstantManager {
           return success();
         }
         size_t numEls = tileType.getNumElements();
-        SmallVector<char> packed((numEls + 7) / 8, 0);
+        SmallVector<char> packed(llvm::divideCeil(numEls, 8), 0);
         size_t i = 0;
-        for (bool value : denseAttr.getValues<bool>()) {
-          if (value)
+        for (bool val : denseAttr.getValues<bool>()) {
+          if (val) {
             packed[i / 8] |= static_cast<char>(1u << (i % 8));
+          }
           ++i;
         }
         writer.writeVarInt(packed.size());
@@ -553,8 +644,9 @@ struct ConstantManager {
 
   LogicalResult writeConstantSection(raw_ostream &stream) {
     // If there are no constants, skip writing this section entirely
-    if (constantsMap.empty())
+    if (constantsMap.empty()) {
       return success();
+    }
     SmallVector<char> buffer;
     llvm::raw_svector_ostream sectionStream(buffer);
     EncodingWriter sectionWriter(sectionStream);
@@ -568,8 +660,9 @@ struct ConstantManager {
     auto offsetsPtr = sectionWriter.tell();
 
     // Reserve space for the offset table (filled later).
-    for (size_t i = 0; i < constantsMap.size(); ++i)
+    for (size_t i = 0; i < constantsMap.size(); ++i) {
       sectionWriter.writeLE<uint64_t>(0);
+    }
 
     // Write each constant and record its starting offset.
     SmallVector<uint64_t> finalOffsets;
@@ -577,10 +670,11 @@ struct ConstantManager {
 
     uint64_t running = 0;
     for (const auto &pair : constantsMap) {
-      if (pair.second.empty())
+      if (pair.second.empty()) {
         return emitError(UnknownLoc::get(pair.first.getContext()))
                << "constant has empty serialized representation, which is "
                   "invalid";
+      }
       finalOffsets.push_back(running);
       sectionWriter.write(pair.second.data(), pair.second.size());
       running += pair.second.size();
@@ -599,7 +693,12 @@ struct ConstantManager {
 
 private:
   llvm::MapVector<Attribute, SmallVector<char>> constantsMap;
+  const BytecodeWriterConfig &config;
 };
+
+/// Runtime version check for enum values used by generated attrs.
+#define GEN_ENUM_VALUE_VERSION_CHECK
+#include "AttrBytecode.inc"
 
 //===----------------------------------------------------------------------===//
 // DebugInfo Section
@@ -613,13 +712,15 @@ public:
   /// This method gets or creates an index for an operation.
   uint64_t getOpIndex(Operation *op) {
     auto it = opIndexMap.find(op);
-    if (it != opIndexMap.end())
+    if (it != opIndexMap.end()) {
       return it->second;
+    }
 
     // Check if the operation location has a reserved index and return it.
     auto reserved = getDebugReserved(op->getLoc());
-    if (reserved != Bytecode::DebugReserved::SIZE)
+    if (reserved != Bytecode::DebugReserved::SIZE) {
       return static_cast<uint64_t>(reserved);
+    }
 
     // Adjust the index to account for reserved indices.
     uint64_t opIndex = opIndexMap.size() +
@@ -632,14 +733,16 @@ public:
   /// This method adds a debug info attribute to an operation.
   void addDebugInfo(uint64_t opIndex, Attribute attr) {
     // Nothing to do if the operation has a reserved index.
-    if (opIndex < static_cast<uint64_t>(Bytecode::DebugReserved::SIZE))
+    if (opIndex < static_cast<uint64_t>(Bytecode::DebugReserved::SIZE)) {
       return;
+    }
 
     // Adjust the index to account for reserved indices.
     opIndex -= static_cast<uint64_t>(Bytecode::DebugReserved::SIZE);
 
-    if (opIndex >= debuginfoIndices.size())
+    if (opIndex >= debuginfoIndices.size()) {
       debuginfoIndices.resize(opIndex + 1);
+    }
     debuginfoIndices[opIndex].push_back(getDebugInfoIndex(attr));
   }
 
@@ -661,8 +764,9 @@ public:
   //   debuginfo-encoding        // Format depends on DebugTag
   LogicalResult writeDebugInfoSection(raw_ostream &stream) {
     // Skip writing the section if there are no debug info attributes.
-    if (debuginfoIndices.empty() && debuginfoList.empty())
+    if (debuginfoIndices.empty() && debuginfoList.empty()) {
       return success();
+    }
 
     SmallVector<char> diData;
     llvm::raw_svector_ostream diStream(diData);
@@ -689,9 +793,11 @@ public:
     diWriter.alignTo(alignof(uint64_t));
 
     // Write the array of debug indices to debug info attributes.
-    for (const auto &indices : debuginfoIndices)
-      for (uint64_t diIndex : indices)
+    for (const auto &indices : debuginfoIndices) {
+      for (uint64_t diIndex : indices) {
         diWriter.writeLE<uint64_t>(diIndex);
+      }
+    }
 
     // Write the total number of debug info attributes.
     diWriter.writeVarInt(debuginfoList.size());
@@ -703,8 +809,9 @@ public:
     auto offsetsPtr = diWriter.tell();
 
     // Reserve space for the offset table (filled later).
-    for (size_t i = 0; i < debuginfoList.size(); ++i)
+    for (size_t i = 0; i < debuginfoList.size(); ++i) {
       diWriter.writeLE<uint32_t>(0);
+    }
 
     // Write each debug info attribute and record its starting offset.
     SmallVector<uint32_t> finalOffsets;
@@ -714,9 +821,10 @@ public:
     for (auto attr : debuginfoList) {
       finalOffsets.push_back(running);
       auto before = diWriter.tell();
-      if (failed(serializeDebugInfo(attr, diWriter)))
+      if (failed(serializeDebugInfo(attr, diWriter))) {
         return emitError(UnknownLoc::get(attr.getContext()),
                          "failed to serialize debug info attribute");
+      }
       running += static_cast<uint32_t>(diWriter.tell() - before);
     }
 
@@ -744,8 +852,9 @@ public:
             [&](Attribute attr) { return success(); })
         .Case([&](CallSiteLoc attr) {
           if (failed(validateDebugInfo(op, attr.getCaller())) ||
-              failed(validateDebugInfo(op, attr.getCallee())))
+              failed(validateDebugInfo(op, attr.getCallee()))) {
             return failure();
+          }
           return success();
         })
         .Default([&](Attribute attr) { return invalidLocError(op, attr); });
@@ -756,13 +865,15 @@ private:
   uint64_t getDebugInfoIndex(Attribute attr) {
     const void *key = attr.getAsOpaquePointer();
     auto it = diIndexMap.find(key);
-    if (it != diIndexMap.end())
+    if (it != diIndexMap.end()) {
       return it->second;
+    }
 
     // Check if the debug info attribute has a reserved index and return it.
     auto reserved = getDebugReserved(attr);
-    if (reserved != Bytecode::DebugReserved::SIZE)
+    if (reserved != Bytecode::DebugReserved::SIZE) {
       return static_cast<uint64_t>(reserved);
+    }
 
     // Register any dependent debug info attributes.
     registerDebugInfo(attr);
@@ -815,8 +926,9 @@ private:
           getDebugInfoIndex(callSiteLoc.getCaller());
         })
         .Case([&](FusedLoc FusedLoc) {
-          for (auto subLoc : FusedLoc.getLocations())
+          for (auto subLoc : FusedLoc.getLocations()) {
             getDebugInfoIndex(subLoc);
+          }
         })
         .Case(
             [&](NameLoc nameLoc) { getDebugInfoIndex(nameLoc.getChildLoc()); })
@@ -969,10 +1081,6 @@ private:
 #define GEN_OPCODE_MAP
 #include "StaticOpcodes.inc"
 
-/// Runtime version check for enum values.
-#define GEN_ENUM_VALUE_VERSION_CHECK
-#include "AttrBytecode.inc"
-
 namespace {
 struct FunctionTableWriter {
   FunctionTableWriter(TypeManager &tm, ConstantManager &cm, StringManager &sm,
@@ -981,22 +1089,25 @@ struct FunctionTableWriter {
 
   LogicalResult writeOperation(Operation *op, EncodingWriter &writer) {
     auto opcode = getOpcodeForOperation(op);
-    if (!opcode)
+    if (!opcode) {
       return op->emitError("operation not supported in bytecode (missing from "
                            "BytecodeOpcodes.td)");
+    }
 
     // Version checking for public operations.
     uint32_t opcodeValue = static_cast<uint32_t>(*opcode);
     if (!mlir::cuda_tile::detail::isOpcodeAvailableInVersion(
-            opcodeValue, config.bytecodeVersion))
+            opcodeValue, config.bytecodeVersion)) {
       return op->emitError() << "operation '" << op->getName().getStringRef()
                              << "' is not available in bytecode version "
                              << config.bytecodeVersion.toString();
+    }
 
     writer.writeVarInt(*opcode);
 
-    if (failed(debuginfo.validateDebugInfo(op)))
+    if (failed(debuginfo.validateDebugInfo(op))) {
       return failure();
+    }
 
     uint64_t functionLocIndex =
         debuginfo.getOpIndex(op->getParentOfType<FunctionOpInterface>());
@@ -1004,27 +1115,31 @@ struct FunctionTableWriter {
 
     auto numSerializedResults =
         dispatchOpWriter(op, writer, typeMgr, constMgr, strMgr, config);
-    if (failed(numSerializedResults))
+    if (failed(numSerializedResults)) {
       return failure();
+    }
     // Only add serialized results to valueIndexMap. Results that were not
     // serialized (due to version compatibility) should not be indexed.
-    for (size_t i = 0; i < *numSerializedResults; ++i)
+    for (size_t i = 0; i < *numSerializedResults; ++i) {
       valueIndexMap[op->getResult(i)] = nextValueIndex++;
+    }
     return success();
   }
 
   std::optional<Bytecode::Opcode> getOpcodeForOperation(Operation *op) {
     auto it = Bytecode::getOpcodeMap().find(op->getName().getStringRef());
-    if (it != Bytecode::getOpcodeMap().end())
+    if (it != Bytecode::getOpcodeMap().end()) {
       return it->second;
+    }
     return std::nullopt;
   }
 
   // Writes the operands of an operation to the bytecode
   void writeOperands(ValueRange operands, EncodingWriter &writer,
                      bool encodeSize = true) {
-    if (encodeSize)
+    if (encodeSize) {
       writer.writeVarInt(operands.size());
+    }
     for (Value operand : operands) {
       uint64_t operandIndex = valueIndexMap.lookup(operand);
       writer.writeVarInt(operandIndex);
@@ -1034,9 +1149,11 @@ struct FunctionTableWriter {
   // Writes result types from a TypeRange to the bytecode.
   LogicalResult writeResultTypes(TypeRange resultTypes, EncodingWriter &writer,
                                  TypeManager &typeMgr) {
-    for (Type type : resultTypes)
-      if (failed(typeMgr.writeTypeIndex(type, writer)))
+    for (Type type : resultTypes) {
+      if (failed(typeMgr.writeTypeIndex(type, writer))) {
         return failure();
+      }
+    }
     return success();
   }
 
@@ -1046,24 +1163,16 @@ struct FunctionTableWriter {
     return writeResultTypes(op->getResultTypes(), writer, typeMgr);
   }
 
-/// Helper macro for writing versioned CudaTile attribute tags.
-/// Performs version check and writes the tag if isSelfContained is true.
-/// Returns failure with an error message if the attribute is not available
-/// in the target bytecode version.
-/// Requires: op, isSelfContained, config, writer in scope.
-#define WRITE_VERSIONED_ATTR_TAG(TagName)                                      \
-  do {                                                                         \
-    if (isSelfContained) {                                                     \
-      if (!isAttrTagAvailableInVersion(                                        \
-              static_cast<uint8_t>(Bytecode::AttributeTag::TagName),           \
-              config.bytecodeVersion))                                         \
-        return op->emitError("attribute '" #TagName                            \
-                             "' is not available in bytecode version ")        \
-               << config.bytecodeVersion.toString();                           \
-      writer.writeVarInt(Bytecode::AttributeTag::TagName);                     \
-    }                                                                          \
-  } while (0)
+private:
+  // Include generated attribute serializers as member functions.
+#define GEN_ATTR_WRITERS
+#include "AttrBytecode.inc"
 
+  // Include generated attribute serialization dispatch.
+#define GEN_ATTR_WRITER_DISPATCH
+#include "AttrBytecode.inc"
+
+public:
   // Writes the index or inline representation of an attribute.
   // This function determines whether to serialize inline or use an index based
   // on the attribute type.
@@ -1072,26 +1181,45 @@ struct FunctionTableWriter {
                        EncodingWriter &writer, TypeManager &typeMgr,
                        ConstantManager &constMgr, StringManager &strMgr,
                        bool isSelfContained = false) {
+    // Emit an error attached to `op` when available, otherwise fall back to
+    // an UnknownLoc-anchored diagnostic.
+    auto emitErr = [&](const Twine &msg) -> InFlightDiagnostic {
+      if (op) {
+        return op->emitError(msg);
+      }
+      return emitError(UnknownLoc::get(attrValue.getContext()), msg);
+    };
+
+    // Dispatch to generated CudaTile attribute serializers.
+    // Falls through to MLIR builtins if not a CudaTile attr.
+    if (succeeded(writeCudaTileAttr(op, attrValue, writer, isSelfContained))) {
+      return success();
+    }
+
+    // Builtin MLIR attrs.
     return TypeSwitch<Attribute, LogicalResult>(attrValue)
         .Case<TypeAttr>([&](TypeAttr typeAttr) {
           // Handle TypeAttr: Write index using TypeManager
-          if (isSelfContained)
+          if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::Type);
+          }
           return typeMgr.writeTypeIndex(typeAttr.getValue(), writer);
         })
         .Case<StringAttr>([&](StringAttr strAttr) {
           // Handle StringAttr: Write index using StringManager
-          if (isSelfContained)
+          if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::String);
+          }
           writer.writeVarInt(strMgr.getStringIndex(strAttr.getValue()));
           return success();
         })
         .Case<IntegerAttr>([&](IntegerAttr intAttr) -> LogicalResult {
           if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::Integer);
-            if (failed(typeMgr.writeTypeIndex(intAttr.getType(), writer)))
-              return op->emitError(
+            if (failed(typeMgr.writeTypeIndex(intAttr.getType(), writer))) {
+              return emitErr(
                   "failed to write type index for self-contained IntegerAttr");
+            }
           }
           writer.writeVarInt(intAttr.getValue().getZExtValue());
           return success();
@@ -1099,16 +1227,18 @@ struct FunctionTableWriter {
         .Case<FloatAttr>([&](FloatAttr floatAttr) -> LogicalResult {
           if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::Float);
-            if (failed(typeMgr.writeTypeIndex(floatAttr.getType(), writer)))
-              return op->emitError(
+            if (failed(typeMgr.writeTypeIndex(floatAttr.getType(), writer))) {
+              return emitErr(
                   "failed to write type index for self-contained FloatAttr");
+            }
           }
           writeAPFloatRepresentation(floatAttr.getValue(), writer);
           return success();
         })
         .Case<BoolAttr>([&](BoolAttr boolAttr) -> LogicalResult {
-          if (isSelfContained)
+          if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::Bool);
+          }
           writer.writeByte(boolAttr.getValue() ? 0x01 : 0x00);
           return success();
         })
@@ -1116,48 +1246,24 @@ struct FunctionTableWriter {
                                      -> LogicalResult {
           if (isSelfContained) {
             writer.writeVarInt(Bytecode::AttributeTag::DenseElements);
-            if (failed(typeMgr.writeTypeIndex(denseAttr.getType(), writer)))
-              return op->emitError(
+            if (failed(typeMgr.writeTypeIndex(denseAttr.getType(), writer))) {
+              return emitErr(
                   "failed to write type index for DenseElementsAttr");
+            }
           }
 
-          if (auto intOrFPAttr =
-                  dyn_cast<DenseTypedElementsAttr>(denseAttr)) {
+          if (auto intOrFPAttr = dyn_cast<DenseTypedElementsAttr>(denseAttr)) {
             uint64_t constantIndex;
             if (failed(constMgr.addConstant(intOrFPAttr, constantIndex)))
-              return op->emitError("failed to add constant attribute '")
+              return emitErr("failed to add constant attribute '")
                      << attrName << "' to pool: " << intOrFPAttr;
             writer.writeVarInt(constantIndex);
             return success();
           }
 
-          return op->emitError("unsupported DenseElementsAttr element type "
-                               "during serialization");
+          return emitErr("unsupported DenseElementsAttr element type "
+                         "during serialization");
         })
-        .Case<cuda_tile::DivByAttr>(
-            [&](cuda_tile::DivByAttr attr) -> LogicalResult {
-              WRITE_VERSIONED_ATTR_TAG(DivBy);
-              writer.writeVarInt(attr.getDivisor());
-              uint8_t flags = 0;
-              if (attr.getEvery().has_value())
-                flags |= 0x01;
-              if (attr.getAlong().has_value())
-                flags |= 0x02;
-              writer.writeByte(flags);
-
-              if (attr.getEvery().has_value())
-                writer.writeSignedVarInt(attr.getEvery().value());
-              if (attr.getAlong().has_value())
-                writer.writeSignedVarInt(attr.getAlong().value());
-              return success();
-            })
-        .Case<cuda_tile::SameElementsAttr>(
-            [&](cuda_tile::SameElementsAttr attr) -> LogicalResult {
-              WRITE_VERSIONED_ATTR_TAG(SameElements);
-              DenseI64ArrayAttr values = attr.getValues();
-              writer.writeLEVarSize(values.asArrayRef());
-              return success();
-            })
         .Case<mlir::ArrayAttr>([&](mlir::ArrayAttr arrayAttr) -> LogicalResult {
           if (isSelfContained)
             writer.writeVarInt(Bytecode::AttributeTag::Array);
@@ -1166,7 +1272,7 @@ struct FunctionTableWriter {
             if (failed(writeSelfContainedAttribute(op, "arrayElement",
                                                    elementAttr, writer, typeMgr,
                                                    constMgr, strMgr)))
-              return op->emitError("failed to write ArrayAttr element: ")
+              return emitErr("failed to write ArrayAttr element: ")
                      << elementAttr;
           return success();
         })
@@ -1180,50 +1286,16 @@ struct FunctionTableWriter {
             if (failed(writeSelfContainedAttribute(op, namedAttr.getName(),
                                                    namedAttr.getValue(), writer,
                                                    typeMgr, constMgr, strMgr)))
-              return op->emitError("failed to write DictionaryAttr element: ")
+              return emitErr("failed to write DictionaryAttr element: ")
                      << namedAttr.getValue();
           }
           return success();
         })
-        .Case<cuda_tile::OptimizationHintsAttr>(
-            [&](cuda_tile::OptimizationHintsAttr optHintsAttr)
-                -> LogicalResult {
-              WRITE_VERSIONED_ATTR_TAG(OptimizationHints);
-              // OptimizationHintsAttr contains a DictionaryAttr.
-              return writeSingleAttribute(op, attrName, optHintsAttr.getValue(),
-                                          writer, typeMgr, constMgr, strMgr,
-                                          /*isSelfContained=*/false);
-            })
-        .Case<cuda_tile::BoundedAttr>([&](cuda_tile::BoundedAttr attr)
-                                          -> LogicalResult {
-          WRITE_VERSIONED_ATTR_TAG(Bounded);
-          uint8_t flags = 0;
-          if (attr.getLb().has_value())
-            flags |= 0x01;
-          if (attr.getUb().has_value())
-            flags |= 0x02;
-          writer.writeByte(flags);
-          if (attr.getLb().has_value())
-            writer.writeSignedVarInt(
-                static_cast<uint64_t>(attr.getLb().value()));
-          if (attr.getUb().has_value())
-            writer.writeSignedVarInt(
-                static_cast<uint64_t>(attr.getUb().value()));
-          return success();
-        })
-#ifdef TILE_IR_INCLUDE_TESTS
-        .Case<cuda_tile::BytecodeTestValueAttr>(
-            [&](cuda_tile::BytecodeTestValueAttr attr) -> LogicalResult {
-              WRITE_VERSIONED_ATTR_TAG(BytecodeTestValue);
-              writer.writeSignedVarInt(attr.getValue());
-              return success();
-            })
-#endif // TILE_IR_INCLUDE_TESTS
         .Default([&](Attribute) -> LogicalResult {
           // Default case: Error for unsupported types in this context
           // TODO: Need to handle other potential attribute types if they occur
-          return op->emitError("unsupported attribute type encountered during "
-                               "serialization of attribute '")
+          return emitErr("unsupported attribute type encountered during "
+                         "serialization of attribute '")
                  << attrName << "': " << attrValue;
         });
   }
@@ -1253,9 +1325,10 @@ struct FunctionTableWriter {
                                  EncodingWriter &writer, TypeManager &typeMgr,
                                  ConstantManager &constMgr,
                                  StringManager &strMgr) {
-    if (nativeValue)
+    if (nativeValue) {
       return writeOpAttribute(op, attrName, *nativeValue, writer, typeMgr,
                               constMgr, strMgr);
+    }
     return success();
   }
 
@@ -1274,6 +1347,18 @@ struct FunctionTableWriter {
   writeOpAttribute(Operation *op, StringRef attrName, const T &nativeValue,
                    EncodingWriter &writer, TypeManager &typeMgr,
                    ConstantManager &constMgr, StringManager &strMgr) {
+    // Emit an error attached to `op` when available, otherwise fall back to
+    // an UnknownLoc-anchored diagnostic. `op` is nullptr when the caller is
+    // TypeManager::writeSelfContainedTypeAttribute.
+    auto emitErr = [&](const Twine &msg) -> InFlightDiagnostic {
+      if (op) {
+        return op->emitError(msg);
+      }
+      MLIRContext *ctx = typeMgr.getContext();
+      assert(ctx && "TypeManager has no cached context yet");
+      return emitError(UnknownLoc::get(ctx), msg);
+    };
+
     // --- Direct Inline Writes ---
     if constexpr (std::is_same_v<T, bool>) {
       writer.writeByte(nativeValue ? 0x01 : 0x00);
@@ -1281,30 +1366,32 @@ struct FunctionTableWriter {
     } else if constexpr (is_cuda_tile_enum<T>::value) {
       // Check per-value version requirements.
       if (!isEnumValueAvailableInVersion<T>(nativeValue,
-                                            config.bytecodeVersion))
-        return op->emitError()
+                                            config.bytecodeVersion)) {
+        return emitErr("")
                << "enum value for attribute '" << attrName
                << "' is not available in bytecode version "
                << static_cast<int>(config.bytecodeVersion.getMajor()) << "."
                << static_cast<int>(config.bytecodeVersion.getMinor());
-      writer.writeVarInt(static_cast<uint32_t>(nativeValue));
+      }
+      writer.writeVarInt(static_cast<uint64_t>(nativeValue));
       return success();
-    } else if constexpr (std::is_same_v<std::decay_t<T>,
-                                        ::llvm::ArrayRef<int32_t>> ||
-                         std::is_same_v<std::decay_t<T>,
-                                        ::llvm::ArrayRef<int64_t>> ||
-                         std::is_same_v<std::decay_t<T>,
-                                        ::llvm::ArrayRef<int>>) {
+    } else if constexpr (
+        std::is_same_v<std::decay_t<T>, ::llvm::ArrayRef<int32_t>> ||
+        std::is_same_v<std::decay_t<T>, ::llvm::ArrayRef<int64_t>> ||
+        std::is_same_v<std::decay_t<T>, ::llvm::ArrayRef<int>> ||
+        std::is_same_v<std::decay_t<T>, ::llvm::ArrayRef<bool>>) {
       writer.writeLEVarSize(nativeValue);
       return success();
     } else if constexpr (std::is_integral_v<T>) {
       unsigned width = sizeof(T) * CHAR_BIT;
-      if (width == 0 || width > 64)
-        return op->emitError()
-               << "unsupported inline integer width for attribute '" << attrName
-               << "': " << width;
+      if (width == 0 || width > 64) {
+        return emitErr("") << "unsupported inline integer width for attribute '"
+                           << attrName << "': " << width;
+      }
       writer.writeVarInt(nativeValue);
       return success();
+    } else if constexpr (std::is_base_of_v<mlir::Type, std::decay_t<T>>) {
+      return typeMgr.writeTypeIndex(nativeValue, writer);
     } else if constexpr (std::is_base_of_v<Attribute, T>) {
       // If the attribute implements an interface, we need to write it
       // self-contained.
@@ -1316,13 +1403,11 @@ struct FunctionTableWriter {
       return success();
       // --- Unsupported ---
     } else {
-      return op->emitError(
-                 "unsupported native C++ type encountered during attribute "
-                 "serialization for attribute '")
+      return emitErr("unsupported native C++ type encountered during attribute "
+                     "serialization for attribute '")
              << attrName << "'";
     }
   }
-
   // Contains generated implementations of the operation-specific
   // bytecode writing functions.
 #define GEN_OP_WRITERS
@@ -1352,16 +1437,21 @@ struct FunctionTableWriter {
     valueIndexMap.clear();
     nextValueIndex = 0;
     // Process function arguments using the interface
-    for (BlockArgument arg : func.getArguments())
+    for (BlockArgument arg : func.getArguments()) {
       valueIndexMap[arg] = nextValueIndex++;
+    }
     // Process operations using the interface
-    for (Block &block : func.getBlocks())
-      for (Operation &op : block.getOperations())
-        if (failed(writeOperation(&op, writer)))
+    for (Block &block : func.getBlocks()) {
+      for (Operation &op : block.getOperations()) {
+        if (failed(writeOperation(&op, writer))) {
           return failure();
+        }
+      }
+    }
     return success();
   }
 
+public:
   /// Collect all function metadata.
   LogicalResult buildFunctionMap(cuda_tile::ModuleOp module) {
     // Get the body of the module, which contains the function definitions.
@@ -1381,14 +1471,15 @@ struct FunctionTableWriter {
       uint64_t functionLocIndex = debuginfo.getOpIndex(op);
       debuginfo.addDebugInfo(functionLocIndex, func.getLoc());
 
-      // Determine if it's an EntryOp
       bool isEntry = isa<cuda_tile::EntryOp>(op);
       Attribute hints;
-      if (auto entryOp = dyn_cast<cuda_tile::EntryOp>(op))
+      if (auto entryOp = dyn_cast<cuda_tile::EntryOp>(op)) {
         hints = entryOp.getOptimizationHintsAttr();
+      }
 
-      functionsMap[op] = FunctionMetadata{nameIndex, signatureIndex,
-                                          functionLocIndex, isEntry, hints};
+      FunctionMetadata meta{nameIndex, signatureIndex, functionLocIndex,
+                            isEntry, hints};
+      functionsMap[op] = meta;
     }
     return success();
   }
@@ -1414,13 +1505,19 @@ struct FunctionTableWriter {
       sectionWriter.writeVarInt(meta.signatureIndex);
       // Write entryFlag.
       uint8_t entryFlag = 0;
-      // TODO: Add support for visibility (Bit 0) when necessary.
-      // Assuming public for now.
+      // Visibility (Bit 0) is set if the function is not public.
+      if (auto sym = dyn_cast<SymbolOpInterface>(op)) {
+        if (sym.getVisibility() != SymbolTable::Visibility::Public) {
+          entryFlag |=
+              static_cast<uint8_t>(Bytecode::FunctionFlags::VisibilityPrivate);
+        }
+      }
       if (meta.isEntry) {
         entryFlag |= static_cast<uint8_t>(Bytecode::FunctionFlags::KindKernel);
-        if (meta.hints)
+        if (meta.hints) {
           entryFlag |= static_cast<uint8_t>(
               Bytecode::FunctionFlags::HasOptimizationHints);
+        }
       }
       sectionWriter.writeByte(entryFlag);
       // Continue writing other metadata.
@@ -1429,12 +1526,15 @@ struct FunctionTableWriter {
       if (meta.isEntry && meta.hints) {
         if (failed(writeSelfContainedAttribute(op, kOptimizationHints,
                                                meta.hints, sectionWriter,
-                                               typeMgr, constMgr, strMgr)))
+                                               typeMgr, constMgr, strMgr))) {
           return failure();
+        }
       }
+
       SmallVector<char> functionBody;
-      if (failed(writeFunctionBody(func, functionBody)))
+      if (failed(writeFunctionBody(func, functionBody))) {
         return failure();
+      }
       sectionWriter.writeVarInt(functionBody.size());
       sectionWriter.write(functionBody.data(), functionBody.size());
     }
@@ -1456,9 +1556,11 @@ struct FunctionTableWriter {
     writer.writeVarInt(region.getBlocks().size());
 
     // Process each block in the region
-    for (Block &block : region)
-      if (failed(writeBlock(block, writer)))
+    for (Block &block : region) {
+      if (failed(writeBlock(block, writer))) {
         return failure();
+      }
+    }
 
     return success();
   }
@@ -1477,8 +1579,9 @@ struct FunctionTableWriter {
     // Process block arguments.
     writer.writeVarInt(block.getNumArguments());
     for (BlockArgument arg : block.getArguments()) {
-      if (failed(typeMgr.writeTypeIndex(arg.getType(), writer)))
+      if (failed(typeMgr.writeTypeIndex(arg.getType(), writer))) {
         return failure();
+      }
       // Assign a new index to the block argument.
       // Block arguments are always new values in this scope.
       assert(!valueIndexMap.count(arg) &&
@@ -1490,14 +1593,17 @@ struct FunctionTableWriter {
     // Write number of operations in the block.
     writer.writeVarInt(block.getOperations().size());
     // Process operations in the block.
-    for (Operation &op : block)
-      if (failed(writeOperation(&op, writer)))
+    for (Operation &op : block) {
+      if (failed(writeOperation(&op, writer))) {
         return failure();
+      }
+    }
 
     // Remove all of the entries added during parsing of this block.
     for (uint64_t i = 0, e = nextValueIndex - originalNextValueIndex; i < e;
-         ++i)
+         ++i) {
       valueIndexMap.pop_back();
+    }
 
     // Restore nextValueIndex to what it was before this block.
     nextValueIndex = originalNextValueIndex;
@@ -1524,6 +1630,15 @@ private:
 };
 } // end anonymous namespace
 
+LogicalResult
+TypeManager::writeSelfContainedTypeAttribute(Attribute attrValue,
+                                             EncodingWriter &writer) {
+  assert(funcWriter && "type attribute writer requires FunctionTableWriter");
+  return funcWriter->writeSelfContainedAttribute(
+      /*op=*/nullptr, "type_param", attrValue, writer, *this, *constMgr,
+      strMgr);
+}
+
 /// Write the global section to the bytecode file.
 static LogicalResult
 writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
@@ -1535,11 +1650,13 @@ writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
   EncodingWriter sectionWriter(sectionStream);
 
   SmallVector<cuda_tile::GlobalOp> globals;
-  for (auto globalOp : module.getOps<cuda_tile::GlobalOp>())
+  for (auto globalOp : module.getOps<cuda_tile::GlobalOp>()) {
     globals.push_back(globalOp);
+  }
 
-  if (globals.empty())
+  if (globals.empty()) {
     return success();
+  }
 
   sectionWriter.writeVarInt(globals.size());
 
@@ -1576,9 +1693,10 @@ writeGlobalSection(raw_ostream &stream, cuda_tile::ModuleOp module,
 
     // 3. Write constant index for the global's value.
     uint64_t constIndex;
-    if (failed(constMgr.addConstant(valueAttr, constIndex)))
+    if (failed(constMgr.addConstant(valueAttr, constIndex))) {
       return globalOp.emitError("failed to add global constant: '")
              << globalOp.getSymName();
+    }
     sectionWriter.writeVarInt(constIndex);
 
     // 4. Write alignment.
@@ -1619,12 +1737,14 @@ static LogicalResult writeProducerSection(raw_ostream &stream,
   // Producer section is only available in version 13.3+.
   static const auto kMinProducerVersion =
       *BytecodeVersion::fromVersion(13, 3, 0);
-  if (config.bytecodeVersion < kMinProducerVersion)
+  if (config.bytecodeVersion < kMinProducerVersion) {
     return success();
+  }
 
   auto producerAttr = module.getProducerAttr();
-  if (!producerAttr)
+  if (!producerAttr) {
     return success();
+  }
 
   SmallVector<char> buffer;
   llvm::raw_svector_ostream sectionStream(buffer);
@@ -1647,99 +1767,64 @@ static LogicalResult writeProducerSection(raw_ostream &stream,
 // layers.
 //===----------------------------------------------------------------------===//
 
-/// Verify that the given module is self-contained and can be serialized into
-/// bytecode without external dependencies. This function performs two main
-/// checks:
-/// 1. Ensures the module only contains function and global operations at the
-///    top level (no other operation types are allowed in the module body).
-/// 2. Validates invariants for some operations. For example, ReduceOp currently
-///    requires only Pure operation in its region.
-static LogicalResult
-verifySelfContainedModuleAndOperationInvariants(cuda_tile::ModuleOp module) {
-  // Validate that we have a self-contained module that matches what we can
-  // encode within the bytecode (e.g. no-non functions/globals/etc. nested in
-  // the module).
-  for (Operation &op : module.getBody().front()) {
-    if (!isa<FunctionOpInterface, GlobalOp>(&op)) {
-      // Do not use op.emitRemark, as that would trigger recursive
-      // verification of the module again.
-      mlir::emitRemark(op.getLoc(), "invalid op: ") << op.getName();
-      return module.emitOpError(
-          "only function and global ops are allowed in the body");
-    }
-  }
-
-  // Allow only ops from the CudaTile dialect inside of the module (at any
-  // nesting level).
-  auto emitInvalidOpRemark = [&](Operation *invalidOp) {
-    emitRemark(invalidOp->getLoc(), "invalid op: ") << invalidOp->getName();
-  };
-
-  Dialect *dialect = module->getDialect();
-  WalkResult status = module->walk([&](Operation *op) {
-    if (op->getDialect() != dialect) {
-      emitInvalidOpRemark(op);
-      module.emitOpError("only ops from the '")
-          << dialect->getNamespace() << "' dialect are allowed";
-      return WalkResult::interrupt();
-    }
-    if (op->getParentOfType<cuda_tile::ReduceOp>() ||
-        op->getParentOfType<cuda_tile::ScanOp>()) {
-      if (!isPure(op)) {
-        emitInvalidOpRemark(op);
-        op->getParentOp()->emitOpError("only pure operations allowed");
-        return WalkResult::interrupt();
-      }
-    }
-    return WalkResult::advance();
-  });
-  if (status.wasInterrupted())
-    return failure();
-  return success();
-}
-
 LogicalResult cuda_tile::writeBytecode(raw_ostream &os,
                                        cuda_tile::ModuleOp module,
                                        BytecodeVersion targetVersion) {
+  // Verify the module (e.g. optimization hints when -Wunsupported-hints
+  // -Werr-hints are set). Caller must set dialect flags before calling.
+  if (failed(verify(module.getOperation()))) {
+    return failure();
+  }
   // Before trying to write the bytecode, verify that the module is
   // self-contained, meaning it does not have any external dependencies that
   // cannot be serialized into bytecode.
-  if (failed(verifySelfContainedModuleAndOperationInvariants(module)))
+  if (failed(verifySelfContainedModuleAndOperationInvariants(module))) {
     return failure();
+  }
 
   // Write the header of the bytecode file.
   BytecodeWriterConfig config{targetVersion};
-  if (failed(writeHeader(os, module, config)))
+  if (failed(writeHeader(os, module, config))) {
     return failure();
+  }
 
   // Initialize Managers
   StringManager stringMgr;
-  TypeManager typeMgr(config);
-  ConstantManager constantMgr;
+  TypeManager typeMgr(config, stringMgr);
+  ConstantManager constantMgr(config);
+  typeMgr.setConstantManager(constantMgr);
   DebugInfoWriter debuginfo(stringMgr);
 
   // Collect all function information to populate the type, string, and constant
   // tables
   FunctionTableWriter funcWriter(typeMgr, constantMgr, stringMgr, debuginfo,
                                  config);
-  if (failed(funcWriter.buildFunctionMap(module)))
+  typeMgr.setFunctionWriter(&funcWriter);
+  if (failed(funcWriter.buildFunctionMap(module))) {
     return failure();
+  }
   if (failed(writeGlobalSection(os, module, stringMgr, typeMgr, constantMgr,
                                 debuginfo, config))) {
     return failure();
   }
-  if (failed(funcWriter.writeFunctionTableSection(os)))
+  if (failed(funcWriter.writeFunctionTableSection(os))) {
     return failure();
-  if (failed(constantMgr.writeConstantSection(os)))
+  }
+  if (failed(constantMgr.writeConstantSection(os))) {
     return failure();
-  if (failed(debuginfo.writeDebugInfoSection(os)))
+  }
+  if (failed(debuginfo.writeDebugInfoSection(os))) {
     return failure();
-  if (failed(typeMgr.writeTypeSection(os)))
+  }
+  if (failed(typeMgr.writeTypeSection(os))) {
     return failure();
-  if (failed(writeProducerSection(os, module, stringMgr, config)))
+  }
+  if (failed(writeProducerSection(os, module, stringMgr, config))) {
     return failure();
-  if (failed(stringMgr.writeStringSection(os)))
+  }
+  if (failed(stringMgr.writeStringSection(os))) {
     return failure();
+  }
 
   // Write the end section to indicate the end of the bytecode.
   os.write(Bytecode::Section::EndOfBytecode);

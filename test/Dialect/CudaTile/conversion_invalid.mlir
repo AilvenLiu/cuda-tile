@@ -103,8 +103,91 @@ cuda_tile.module @ftof_no_op {
 cuda_tile.module @ftof_non_float_result {
   cuda_tile.entry @func() {
     %0 = cuda_tile.constant <f16: [1.1, 2.2]> : !cuda_tile.tile<2xf16>
-    // expected-error @below{{op result #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<2xi32>'}}
+    // expected-error @below{{op result #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN or f8E5M3FNU values, but got '!cuda_tile.tile<2xi32>'}}
     cuda_tile.ftof %0 : !cuda_tile.tile<2xf16> -> !cuda_tile.tile<2xi32>
+  }
+}
+
+// f8E5M3FNU rounding-mode rejection coverage. The verifier rules are in
+// FToFOp::verify (tile_ir/lib/Dialect/CudaTile/IR/CudaTile.cpp:3043).
+
+// -----
+
+// Rule 2: any A -> ue5m3 must use nearest_even.
+cuda_tile.module @to_ue5m3_invalid_zero {
+  cuda_tile.entry @func() {
+    %0 = cuda_tile.constant <f32: [1.0, 2.0]> : !cuda_tile.tile<2xf32>
+    // expected-error @below{{invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported}}
+    cuda_tile.ftof %0 rounding<zero> : !cuda_tile.tile<2xf32> -> !cuda_tile.tile<2xf8E5M3FNU>
+  }
+}
+
+// -----
+
+cuda_tile.module @to_ue5m3_invalid_positive_inf {
+  cuda_tile.entry @func() {
+    %0 = cuda_tile.constant <f16: [1.0, 2.0]> : !cuda_tile.tile<2xf16>
+    // expected-error @below{{invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported}}
+    cuda_tile.ftof %0 rounding<positive_inf> : !cuda_tile.tile<2xf16> -> !cuda_tile.tile<2xf8E5M3FNU>
+  }
+}
+
+// -----
+
+// Rule 1: ue5m3 -> f8E8M0FNU only allows zero and positive_inf.
+cuda_tile.module @from_ue5m3_to_f8E8M0FNU_invalid_ne {
+  cuda_tile.entry @func() {
+    %c = cuda_tile.constant <i8: [0, 0]> : !cuda_tile.tile<2xi8>
+    %a = cuda_tile.bitcast %c : !cuda_tile.tile<2xi8> -> !cuda_tile.tile<2xf8E5M3FNU>
+    // expected-error @below{{invalid rounding mode specified for conversion to f8E8M0FNU. Only 'zero' and 'positive_inf' are supported}}
+    cuda_tile.ftof %a rounding<nearest_even> : !cuda_tile.tile<2xf8E5M3FNU> -> !cuda_tile.tile<2xf8E8M0FNU>
+  }
+}
+
+// -----
+
+// Rule 2: ue5m3 -> {f8E4M3FN, f8E5M2, f4E2M1FN} only allows nearest_even.
+cuda_tile.module @from_ue5m3_to_f8E4M3FN_invalid_zero {
+  cuda_tile.entry @func() {
+    %c = cuda_tile.constant <i8: [0, 0]> : !cuda_tile.tile<2xi8>
+    %a = cuda_tile.bitcast %c : !cuda_tile.tile<2xi8> -> !cuda_tile.tile<2xf8E5M3FNU>
+    // expected-error @below{{invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported}}
+    cuda_tile.ftof %a rounding<zero> : !cuda_tile.tile<2xf8E5M3FNU> -> !cuda_tile.tile<2xf8E4M3FN>
+  }
+}
+
+// -----
+
+cuda_tile.module @from_ue5m3_to_f4E2M1FN_invalid_negative_inf {
+  cuda_tile.entry @func() {
+    %c = cuda_tile.constant <i8: [0, 0]> : !cuda_tile.tile<2xi8>
+    %a = cuda_tile.bitcast %c : !cuda_tile.tile<2xi8> -> !cuda_tile.tile<2xf8E5M3FNU>
+    // expected-error @below{{invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported}}
+    cuda_tile.ftof %a rounding<negative_inf> : !cuda_tile.tile<2xf8E5M3FNU> -> !cuda_tile.tile<2xf4E2M1FN>
+  }
+}
+
+// -----
+
+// Rule 6: ue5m3 -> f16 (not strict widening because UE5M3 max-exp 16 > f16
+// max-exp 15). Only nearest_even and zero are allowed.
+cuda_tile.module @from_ue5m3_to_f16_invalid_negative_inf {
+  cuda_tile.entry @func() {
+    %c = cuda_tile.constant <i8: [0, 0]> : !cuda_tile.tile<2xi8>
+    %a = cuda_tile.bitcast %c : !cuda_tile.tile<2xi8> -> !cuda_tile.tile<2xf8E5M3FNU>
+    // expected-error @below{{invalid rounding mode specified. Only 'nearest_even' and 'zero' are supported for narrowing conversions to standard types}}
+    cuda_tile.ftof %a rounding<negative_inf> : !cuda_tile.tile<2xf8E5M3FNU> -> !cuda_tile.tile<2xf16>
+  }
+}
+
+// -----
+
+cuda_tile.module @from_ue5m3_to_f16_invalid_nearest_away {
+  cuda_tile.entry @func() {
+    %c = cuda_tile.constant <i8: [0, 0]> : !cuda_tile.tile<2xi8>
+    %a = cuda_tile.bitcast %c : !cuda_tile.tile<2xi8> -> !cuda_tile.tile<2xf8E5M3FNU>
+    // expected-error @below{{invalid rounding mode specified. Only 'nearest_even' and 'zero' are supported for narrowing conversions to standard types}}
+    cuda_tile.ftof %a rounding<nearest_away> : !cuda_tile.tile<2xf8E5M3FNU> -> !cuda_tile.tile<2xf16>
   }
 }
 
@@ -123,7 +206,7 @@ cuda_tile.module @ftoi_mismatched_shape {
 cuda_tile.module @ftoi_non_float_operand {
   cuda_tile.entry @func() {
     %0 = cuda_tile.constant <i16: [1, 2]> : !cuda_tile.tile<2xi16>
-    // expected-error @below{{op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<2xi16>'}}
+    // expected-error @below{{op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN or f8E5M3FNU values, but got '!cuda_tile.tile<2xi16>'}}
     cuda_tile.ftoi %0 signed : !cuda_tile.tile<2xi16> -> !cuda_tile.tile<2xi32>
   }
 }

@@ -22,6 +22,7 @@
 #include "mlir/Support/DebugStringHelper.h"
 #include "mlir/Transforms/InliningUtils.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -37,6 +38,9 @@
 
 using namespace mlir;
 using namespace mlir::cuda_tile;
+
+/// Attribute name for `OptimizationHintsAttr` on ops that carry it in asm.
+static constexpr char kOptimizationHintsAttr[] = "optimization_hints";
 
 int64_t cuda_tile::getMaxSignedValueForBitwidth(int64_t n) {
   assert(n > 0 && n <= 64 && "invalid bitwidth");
@@ -109,10 +113,27 @@ static mlir::LogicalResult validateSSANameConsistency(
   return mlir::success();
 }
 
+static mlir::ParseResult parseOptionalSignatureAttrDict(
+    mlir::OpAsmParser &parser, mlir::DictionaryAttr &attrs,
+    cuda_tile::SignatureAttrDictParser parseAttrDict) {
+  if (parseAttrDict) {
+    return parseAttrDict(parser, attrs);
+  }
+
+  mlir::NamedAttrList attrList;
+  if (parser.parseOptionalAttrDict(attrList)) {
+    return mlir::failure();
+  }
+  attrs = attrList.empty() ? mlir::DictionaryAttr::get(parser.getContext())
+                           : attrList.getDictionary(parser.getContext());
+  return mlir::success();
+}
+
 /// Parses a single function argument with cuda_tile type support.
 static mlir::ParseResult parseSingleArgument(
     mlir::OpAsmParser &parser,
-    llvm::SmallVectorImpl<mlir::OpAsmParser::Argument> &arguments) {
+    llvm::SmallVectorImpl<mlir::OpAsmParser::Argument> &arguments,
+    cuda_tile::SignatureAttrDictParser parseAttrDict) {
   mlir::OpAsmParser::Argument arg;
   arg.ssaName.location = parser.getCurrentLocation();
 
@@ -131,13 +152,14 @@ static mlir::ParseResult parseSingleArgument(
     return mlir::failure();
 
   // Parse type and attributes using cuda_tile-aware parser
-  mlir::NamedAttrList attrs;
+  mlir::DictionaryAttr attrs;
   if (parseCudaTileType(parser, arg.type) ||
-      parser.parseOptionalAttrDict(attrs) ||
-      parser.parseOptionalLocationSpecifier(arg.sourceLoc))
+      parseOptionalSignatureAttrDict(parser, attrs, parseAttrDict) ||
+      parser.parseOptionalLocationSpecifier(arg.sourceLoc)) {
     return mlir::failure();
+  }
 
-  arg.attrs = attrs.getDictionary(parser.getContext());
+  arg.attrs = attrs;
   arguments.push_back(arg);
   return mlir::success();
 }
@@ -146,7 +168,7 @@ static mlir::ParseResult parseSingleArgument(
 static mlir::ParseResult parseFunctionArgumentList(
     mlir::OpAsmParser &parser, bool allowVariadic,
     llvm::SmallVectorImpl<mlir::OpAsmParser::Argument> &arguments,
-    bool &isVariadic) {
+    bool &isVariadic, cuda_tile::SignatureAttrDictParser parseAttrDict) {
   isVariadic = false;
 
   return parser.parseCommaSeparatedList(
@@ -162,7 +184,7 @@ static mlir::ParseResult parseFunctionArgumentList(
           return mlir::success();
         }
 
-        return parseSingleArgument(parser, arguments);
+        return parseSingleArgument(parser, arguments, parseAttrDict);
       });
 }
 
@@ -170,15 +192,15 @@ static mlir::ParseResult parseFunctionArgumentList(
 static mlir::ParseResult
 parseTypeAndAttrList(mlir::OpAsmParser &parser,
                      llvm::SmallVectorImpl<mlir::Type> &types,
-                     llvm::SmallVectorImpl<mlir::DictionaryAttr> &attrs) {
+                     llvm::SmallVectorImpl<mlir::DictionaryAttr> &attrs,
+                     cuda_tile::SignatureAttrDictParser parseAttrDict) {
   return parser.parseCommaSeparatedList([&]() -> mlir::ParseResult {
     types.emplace_back();
     attrs.emplace_back();
-    mlir::NamedAttrList attrList;
     if (parseCudaTileType(parser, types.back()) ||
-        parser.parseOptionalAttrDict(attrList))
+        parseOptionalSignatureAttrDict(parser, attrs.back(), parseAttrDict)) {
       return mlir::failure();
-    attrs.back() = attrList.getDictionary(parser.getContext());
+    }
     return mlir::success();
   });
 }
@@ -186,14 +208,18 @@ parseTypeAndAttrList(mlir::OpAsmParser &parser,
 /// Parses function result list (single type or parenthesized type list).
 static mlir::ParseResult parseFunctionResultList(
     mlir::OpAsmParser &parser, llvm::SmallVectorImpl<mlir::Type> &resultTypes,
-    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs) {
+    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs,
+    cuda_tile::SignatureAttrDictParser parseAttrDict) {
   if (mlir::failed(parser.parseOptionalLParen())) {
     // Single result type (no parentheses)
     mlir::Type resultType;
     if (parseCudaTileType(parser, resultType))
       return mlir::failure();
     resultTypes.push_back(resultType);
-    resultAttrs.emplace_back();
+    resultAttrs.push_back(mlir::DictionaryAttr::get(parser.getContext()));
+    // Keep bare single-result syntax unambiguous. A following `{` can start a
+    // region or an op attr-dict, so single-result attrs are only supported in
+    // the parenthesized form, e.g. `-> (T {attrs})`.
     return mlir::success();
   }
 
@@ -201,8 +227,9 @@ static mlir::ParseResult parseFunctionResultList(
   if (mlir::succeeded(parser.parseOptionalRParen()))
     return mlir::success(); // Empty result list
 
-  if (parseTypeAndAttrList(parser, resultTypes, resultAttrs))
+  if (parseTypeAndAttrList(parser, resultTypes, resultAttrs, parseAttrDict)) {
     return mlir::failure();
+  }
   return parser.parseRParen();
 }
 
@@ -213,29 +240,34 @@ mlir::ParseResult cuda_tile::parseFunctionSignatureWithArguments(
     mlir::OpAsmParser &parser, bool allowVariadic,
     llvm::SmallVectorImpl<mlir::OpAsmParser::Argument> &arguments,
     bool &isVariadic, llvm::SmallVectorImpl<mlir::Type> &resultTypes,
-    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs) {
-  if (parseFunctionArgumentList(parser, allowVariadic, arguments, isVariadic))
+    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs,
+    SignatureAttrDictParser parseAttrDict) {
+  if (parseFunctionArgumentList(parser, allowVariadic, arguments, isVariadic,
+                                parseAttrDict)) {
     return mlir::failure();
+  }
   if (mlir::succeeded(parser.parseOptionalArrow()))
-    return parseFunctionResultList(parser, resultTypes, resultAttrs);
+    return parseFunctionResultList(parser, resultTypes, resultAttrs,
+                                   parseAttrDict);
   return mlir::success();
 }
 
 /// Print function signature with cuda_tile dialect type support.
 static void printFunctionSignatureWithCudaTileTypes(
     OpAsmPrinter &printer, TypeRange argTypes, ArrayAttr argAttrs,
-    bool isVariadic, TypeRange resultTypes, Region *body) {
+    bool isVariadic, TypeRange resultTypes, ArrayAttr resultAttrs,
+    SignatureArgumentPrinter printArgument,
+    SignatureAttrDictPrinter printAttrDict) {
   printer << '(';
   for (unsigned i = 0, e = argTypes.size(); i < e; ++i) {
     if (i > 0)
       printer << ", ";
-    auto arg = body->getArgument(i);
-    ArrayRef<NamedAttribute> attrs;
-    if (argAttrs)
-      attrs = llvm::cast<DictionaryAttr>(argAttrs[i]).getValue();
-    printer.printOperand(arg);
+    printArgument(printer, i);
     printer << ": ";
-    printCudaTileType(printer, arg.getType());
+    printCudaTileType(printer, argTypes[i]);
+    if (printAttrDict && argAttrs) {
+      printAttrDict(printer, cast<DictionaryAttr>(argAttrs[i]));
+    }
   }
 
   if (isVariadic) {
@@ -248,28 +280,51 @@ static void printFunctionSignatureWithCudaTileTypes(
 
   if (!resultTypes.empty()) {
     printer << " -> ";
-    if (resultTypes.size() == 1) {
+    bool singleBareResult =
+        resultTypes.size() == 1 &&
+        (!resultAttrs || cast<DictionaryAttr>(resultAttrs[0]).empty());
+    if (singleBareResult) {
       printCudaTileType(printer, resultTypes[0]);
     } else {
       printer << '(';
-      llvm::interleaveComma(resultTypes, printer, [&](Type resultType) {
-        printCudaTileType(printer, resultType);
-      });
+      for (unsigned i = 0, e = resultTypes.size(); i < e; ++i) {
+        if (i > 0) {
+          printer << ", ";
+        }
+        printCudaTileType(printer, resultTypes[i]);
+        if (printAttrDict && resultAttrs) {
+          printAttrDict(printer, cast<DictionaryAttr>(resultAttrs[i]));
+        }
+      }
       printer << ')';
     }
   }
 }
 
+void cuda_tile::printFunctionSignatureWithCudaTileTypes(
+    OpAsmPrinter &printer, TypeRange inputs, ArrayAttr argAttrs,
+    TypeRange results, ArrayAttr resultAttrs,
+    SignatureArgumentPrinter printArgument,
+    SignatureAttrDictPrinter printAttrDict) {
+  ::printFunctionSignatureWithCudaTileTypes(
+      printer, inputs, argAttrs, /*isVariadic=*/false, results, resultAttrs,
+      printArgument, printAttrDict);
+}
+
 /// Main function signature parser with cuda_tile dialect support, extracting
-/// attributes and region from FunctionOpInterface
+/// attributes and region from FunctionOpInterface.
 void cuda_tile::printFunctionSignatureWithCudaTileTypes(OpAsmPrinter &printer,
                                                         Operation *op,
                                                         TypeRange inputs,
                                                         TypeRange results) {
   auto funcOp = dyn_cast<FunctionOpInterface>(op);
   ::printFunctionSignatureWithCudaTileTypes(
-      printer, inputs, funcOp.getArgAttrsAttr(),
-      /*isVariadic=*/false, results, &funcOp.getFunctionBody());
+      printer, inputs, funcOp.getArgAttrsAttr(), /*isVariadic=*/false, results,
+      funcOp.getResAttrsAttr(),
+      [&](OpAsmPrinter &printer, unsigned i) {
+        printer.printOperand(funcOp.getFunctionBody().getArgument(i));
+      },
+      /*printAttrDict=*/{});
 }
 
 //===----------------------------------------------------------------------===//
@@ -318,13 +373,14 @@ static bool isValidDenseElementType(Type elementType) {
          isa<Float8E4M3FNType>(elementType) ||  // f8E4M3FN
          isa<Float8E5M2Type>(elementType) ||    // f8E5M2
          isa<Float8E8M0FNUType>(elementType) || // f8E8M0FNU
+         isa<Float8E5M3FNUType>(elementType) || // f8E5M3FNU
          isa<Float4E2M1FNType>(elementType);    // f4E2M1FN
 }
 
 // Parse format: constant <f32: 0x7F800000> : tile<f32>
 static ParseResult parseDenseTypedElementsAttr(OpAsmParser &parser,
-                                                 DenseTypedElementsAttr &attr,
-                                                 Type &resultType) {
+                                               DenseTypedElementsAttr &attr,
+                                               Type &resultType) {
   if (parser.parseLess())
     return failure();
 
@@ -335,7 +391,9 @@ static ParseResult parseDenseTypedElementsAttr(OpAsmParser &parser,
            << "expect element type to be one of i1 or i8 or i16 or i32 or i64 "
               "or f16 "
               "or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or "
-              "f8E8M0FNU or f4E2M1FN values, but got "
+              "f8E8M0FNU or f4E2M1FN"
+              " or f8E5M3FNU"
+              " values, but got "
            << prefixElementType;
 
   // Validate that prefixElementType is one of the allowed types
@@ -344,7 +402,9 @@ static ParseResult parseDenseTypedElementsAttr(OpAsmParser &parser,
            << "expect element type to be one of i1 or i8 or i16 or i32 or i64 "
               "or f16 "
               "or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or "
-              "f8E8M0FNU or f4E2M1FN values, but got "
+              "f8E8M0FNU or f4E2M1FN"
+              " or f8E5M3FNU"
+              " values, but got "
            << prefixElementType;
   }
 
@@ -595,8 +655,8 @@ static ParseResult parseDenseTypedElementsAttr(OpAsmParser &parser,
 
 // constant <f32: 42.0> : tile<f32>
 static void printDenseTypedElementsAttr(OpAsmPrinter &p, Operation *op,
-                                          DenseTypedElementsAttr attr,
-                                          Type resultType) {
+                                        DenseTypedElementsAttr attr,
+                                        Type resultType) {
   // Print the dense values part (everything before the colon)
   std::string attrStr;
   llvm::raw_string_ostream attrStream(attrStr);
@@ -625,14 +685,13 @@ static void printDenseTypedElementsAttr(OpAsmPrinter &p, Operation *op,
 
 static ParseResult
 parseDenseTypedElementsAttrNoResult(OpAsmParser &parser,
-                                      DenseTypedElementsAttr &attr) {
+                                    DenseTypedElementsAttr &attr) {
   Type resultType;
   return parseDenseTypedElementsAttr(parser, attr, resultType);
 }
 
-static void
-printDenseTypedElementsAttrNoResult(OpAsmPrinter &p, Operation *op,
-                                      DenseTypedElementsAttr attr) {
+static void printDenseTypedElementsAttrNoResult(OpAsmPrinter &p, Operation *op,
+                                                DenseTypedElementsAttr attr) {
   printDenseTypedElementsAttr(p, op, attr, attr.getType());
 }
 
@@ -912,8 +971,8 @@ static void printIntegerRoundingMode(OpAsmPrinter &printer, Operation *op,
 
 static ParseResult parseIEEERoundingMode(OpAsmParser &parser,
                                          RoundingModeAttr &attr) {
-  static const StringRef allowedModes[] = {"nearest_even", "zero",
-                                           "negative_inf", "positive_inf"};
+  static const StringRef allowedModes[] = {
+      "nearest_even", "zero", "negative_inf", "positive_inf", "nearest_away"};
 
   auto ieeeValidator = [](OpAsmParser &parser, RoundingMode roundingMode,
                           StringRef roundingModeStr) -> ParseResult {
@@ -921,7 +980,8 @@ static ParseResult parseIEEERoundingMode(OpAsmParser &parser,
     if (roundingMode != RoundingMode::NEAREST_EVEN &&
         roundingMode != RoundingMode::ZERO &&
         roundingMode != RoundingMode::NEGATIVE_INF &&
-        roundingMode != RoundingMode::POSITIVE_INF) {
+        roundingMode != RoundingMode::POSITIVE_INF &&
+        roundingMode != RoundingMode::NEAREST_AWAY) {
       return failure();
     }
     return success();
@@ -1049,17 +1109,22 @@ ParseResult parseArgumentRegion(OpAsmParser &parser, Region &region) {
   SmallVector<DictionaryAttr> resultAttrs;
   bool isVariadic;
   if (parseFunctionArgumentList(parser, /*allowVariadic=*/false, arguments,
-                                isVariadic))
+                                isVariadic, /*parseAttrDict=*/{})) {
     return failure();
+  }
   return parser.parseRegion(region, arguments);
 }
 
 template <typename OpT>
 void printArgumentRegion(OpAsmPrinter &p, OpT op, Region &region) {
   p.printNewline();
-  printFunctionSignatureWithCudaTileTypes(p, region.getArgumentTypes(),
-                                          /*argAttrs=*/{}, false,
-                                          /*resultTypes=*/{}, &region);
+  printFunctionSignatureWithCudaTileTypes(
+      p, region.getArgumentTypes(), /*argAttrs=*/{}, /*resultTypes=*/{},
+      /*resultAttrs=*/{},
+      [&](OpAsmPrinter &printer, unsigned i) {
+        printer.printOperand(region.getArgument(i));
+      },
+      /*printAttrDict=*/{});
   p << ' ';
   p.printRegion(region, /*printEntryBlockArgs=*/false);
 }
@@ -1291,6 +1356,61 @@ static void printSymbolVisibility(OpAsmPrinter &printer, Operation *op,
     printer << stringifySymbolVisibility(attr.getValue()) << " ";
 }
 
+// `inbounds = [true, false, ...]` parser for use as a custom directive in
+// declarative assembly formats. When the clause is absent, synthesize the
+// required all-false attribute from the already-parsed index rank.
+static ParseResult
+parseInbounds(OpAsmParser &parser, DenseBoolArrayAttr &inbounds,
+              ArrayRef<OpAsmParser::UnresolvedOperand> indices) {
+  if (failed(parser.parseOptionalKeyword("inbounds"))) {
+    inbounds = parser.getBuilder().getDenseBoolArrayAttr(
+        SmallVector<bool>(indices.size(), /*value=*/false));
+    return success();
+  }
+  if (parser.parseEqual()) {
+    return failure();
+  }
+
+  SmallVector<bool> values;
+  if (parser.parseCommaSeparatedList(
+          OpAsmParser::Delimiter::Square, [&]() -> ParseResult {
+            StringRef tok;
+            auto loc = parser.getCurrentLocation();
+            if (parser.parseKeyword(&tok)) {
+              return failure();
+            }
+            if (tok == "true") {
+              values.push_back(true);
+            } else if (tok == "false") {
+              values.push_back(false);
+            } else {
+              return parser.emitError(loc)
+                     << "expected 'true' or 'false' in inbounds list, got '"
+                     << tok << "'";
+            }
+            return success();
+          })) {
+    return failure();
+  }
+
+  inbounds = parser.getBuilder().getDenseBoolArrayAttr(values);
+  return success();
+}
+
+// Companion printer. Elide the all-false value; that is the canonical textual
+// spelling for the parser-synthesized conservative default.
+static void printInbounds(OpAsmPrinter &printer, Operation * /*op*/,
+                          DenseBoolArrayAttr inbounds, ValueRange /*indices*/) {
+  if (!inbounds ||
+      llvm::all_of(inbounds.asArrayRef(), [](bool v) { return !v; })) {
+    return;
+  }
+  printer << "inbounds = [";
+  llvm::interleaveComma(inbounds.asArrayRef(), printer,
+                        [&](bool v) { printer << (v ? "true" : "false"); });
+  printer << "]";
+}
+
 //===----------------------------------------------------------------------===//
 // Tablegen Definitions
 //===----------------------------------------------------------------------===//
@@ -1321,42 +1441,40 @@ static std::optional<bool> getConstantBoolValue(Value value) {
   return std::nullopt;
 }
 
-static inline bool isConstantTrueVal(mlir::Value value) {
+static inline bool isConstantTrueVal(Value value) {
   auto val = getConstantBoolValue(value);
   return val && *val;
 }
 
-static inline bool isConstantFalseVal(mlir::Value value) {
+static inline bool isConstantFalseVal(Value value) {
   auto val = getConstantBoolValue(value);
   return val && !(*val);
 }
 
-static bool isConstantOnesValue(mlir::Value value) {
+/// Check whether all elements of a constant integer value match |pred|.
+static bool
+isConstantIntMatching(Value value,
+                      llvm::function_ref<bool(const APInt &)> pred) {
   auto constVal = value.getDefiningOp<cuda_tile::ConstantOp>();
   if (!constVal)
     return false;
-  auto type = constVal.getType().getElementType();
-  auto intType = llvm::dyn_cast<IntegerType>(type);
+  auto intType = dyn_cast<IntegerType>(constVal.getType().getElementType());
   if (!intType)
     return false;
   DenseTypedElementsAttr cstAttr = constVal.getValue();
-  if (cstAttr.isSplat() || cstAttr.size() == 1)
-    return (*cstAttr.getValues<APInt>().begin() == 1);
-  return false;
+  if (cstAttr.isSplat()) {
+    return pred(cstAttr.getSplatValue<APInt>());
+  }
+  return llvm::all_of(cstAttr.getValues<APInt>(), pred);
 }
 
-static bool isConstantZeroValue(mlir::Value value) {
-  auto constVal = value.getDefiningOp<cuda_tile::ConstantOp>();
-  if (!constVal)
-    return false;
-  auto type = constVal.getType().getElementType();
-  auto intType = llvm::dyn_cast<IntegerType>(type);
-  if (!intType)
-    return false;
-  DenseTypedElementsAttr cstAttr = constVal.getValue();
-  if (cstAttr.isSplat() || cstAttr.size() == 1)
-    return (*cstAttr.getValues<APInt>().begin() == 0);
-  return false;
+static bool isConstantOnesValue(Value value) {
+  return isConstantIntMatching(value, [](const APInt &v) { return v == 1; });
+}
+
+static bool isConstantZeroValue(Value value) {
+  return isConstantIntMatching(value,
+                               [](const APInt &v) { return v.isZero(); });
 }
 
 // Helper function to insert SelectOp for given cond & values
@@ -1489,13 +1607,33 @@ OpFoldResult AssumeOp::fold(FoldAdaptor adaptor) {
   return {};
 }
 
+// Verify that an explicit `inbounds` annotation has one entry per index
+// dimension. Used by the view ops that accept an `inbounds` annotation.
+template <typename OpTy>
+static LogicalResult verifyInboundsSize(OpTy op) {
+  std::optional<ArrayRef<bool>> inbounds = op.getInbounds();
+  if (!inbounds) {
+    return success();
+  }
+  if (inbounds->size() != op.getIndex().size()) {
+    return op.emitOpError("inbounds size (")
+           << inbounds->size()
+           << ") must match the number of index dimensions ("
+           << op.getIndex().size() << ")";
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // AtomicRMWTkoOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult AtomicRMWTkoOp::verify() {
-  auto ptrType =
-      cast<cuda_tile::PointerType>(getPointers().getType().getElementType());
+  Type ptrElemTy = getPointers().getType().getElementType();
+  auto ptrType = dyn_cast<cuda_tile::PointerType>(ptrElemTy);
+  if (!ptrType) {
+    return emitOpError("expected pointer element type, got ") << ptrElemTy;
+  }
   Type pointeeType = ptrType.getPointeeType();
   Type argElType = getArg().getType().getElementType();
   if (pointeeType != argElType)
@@ -1616,6 +1754,10 @@ LogicalResult AtomicRedViewTkoOp::verify() {
     }
   }
 
+  if (failed(verifyUnrestrictedViewPtrAttr(*this, getView()))) {
+    return failure();
+  }
+
   return success();
 }
 
@@ -1624,8 +1766,11 @@ LogicalResult AtomicRedViewTkoOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult AtomicCASTkoOp::verify() {
-  auto ptrType =
-      cast<cuda_tile::PointerType>(getPointers().getType().getElementType());
+  Type ptrElemTy = getPointers().getType().getElementType();
+  auto ptrType = dyn_cast<cuda_tile::PointerType>(ptrElemTy);
+  if (!ptrType) {
+    return emitOpError("expected pointer element type, got ") << ptrElemTy;
+  }
   Type pointeeType = ptrType.getPointeeType();
   Type valElType = getVal().getType().getElementType();
   if (pointeeType != valElType)
@@ -2022,6 +2167,51 @@ LogicalResult DivIOp::verify() {
   return success();
 }
 
+Speculation::Speculatability DivIOp::getSpeculatability() {
+  auto cst = getRhs().getDefiningOp<ConstantOp>();
+  if (!cst) {
+    return Speculation::NotSpeculatable;
+  }
+  auto attr = dyn_cast<DenseIntElementsAttr>(cst.getValue());
+  if (!attr) {
+    return Speculation::NotSpeculatable;
+  }
+  bool isSigned = getSignedness() == Signedness::Signed;
+  for (const APInt &v : attr.getValues<APInt>()) {
+    // X / 0 => UB
+    if (v.isZero()) {
+      return Speculation::NotSpeculatable;
+    }
+    // isAllOnes() is -1 in two's complement.
+    // INT_MIN / -1 overflows and is UB for signed division.
+    // We conservatively assume the dividend (lhs) may be INT_MIN;
+    // proving otherwise would require range analysis.
+    if (isSigned && v.isAllOnes()) {
+      return Speculation::NotSpeculatable;
+    }
+  }
+  return Speculation::Speculatable;
+}
+
+Speculation::Speculatability RemIOp::getSpeculatability() {
+  // X % 0 => UB (for both signed and unsigned).
+  // X % -1 is always 0 and well-defined, no need to check for -1.
+  auto cst = getRhs().getDefiningOp<ConstantOp>();
+  if (!cst) {
+    return Speculation::NotSpeculatable;
+  }
+  auto attr = dyn_cast<DenseIntElementsAttr>(cst.getValue());
+  if (!attr) {
+    return Speculation::NotSpeculatable;
+  }
+  for (const APInt &v : attr.getValues<APInt>()) {
+    if (v.isZero()) {
+      return Speculation::NotSpeculatable;
+    }
+  }
+  return Speculation::Speculatable;
+}
+
 //===----------------------------------------------------------------------===//
 // ExtIOp
 //===----------------------------------------------------------------------===//
@@ -2108,6 +2298,80 @@ LogicalResult ExtractOp::verify() {
           if (indexValue > maxValidIndex) {
             mlir::emitWarning(getLoc())
                 << "extract index " << i << " value " << indexValue
+                << " may be out of bounds (max valid index: " << maxValidIndex
+                << ")";
+          }
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// InsertOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult InsertOp::verify() {
+  cuda_tile::TileType sourceType = getSource().getType();
+  cuda_tile::TileType resultType = getResult().getType();
+
+  // Check 1: Element type compatibility
+  if (sourceType.getElementType() != resultType.getElementType()) {
+    return emitOpError("source and result element type do not match");
+  }
+
+  // Check 2: Rank matching
+  if (sourceType.getRank() != resultType.getRank()) {
+    return emitOpError("source and result must have the same rank");
+  }
+
+  // Check 3: Even division requirement
+  for (int64_t i = 0, e = sourceType.getRank(); i < e; ++i) {
+    int64_t sourceDim = sourceType.getDimSize(static_cast<unsigned>(i));
+    int64_t resultDim = resultType.getDimSize(static_cast<unsigned>(i));
+    if (resultDim % sourceDim != 0) {
+      return emitOpError("result dimension ")
+             << i << " size (" << resultDim
+             << ") must be evenly divisible by source dimension " << i
+             << " size (" << sourceDim << ")";
+    }
+  }
+
+  // Check 4: Index count validation
+  if (static_cast<int64_t>(getIndices().size()) != sourceType.getRank()) {
+    return emitOpError("expected ")
+           << sourceType.getRank() << " indices, but got "
+           << getIndices().size();
+  }
+
+  // Check 5: Bounds checking for constant indices.
+  // Index type and scalar-ness are enforced by the ODS operand constraint.
+  for (int64_t i = 0, e = sourceType.getRank(); i < e; ++i) {
+    Value index = getIndices()[i];
+
+    // Bounds checking for constant indices (warnings only to allow compilation)
+    if (auto constantOp = index.getDefiningOp<cuda_tile::ConstantOp>()) {
+      if (auto attr = dyn_cast<DenseIntElementsAttr>(constantOp.getValue())) {
+        if (attr.isSplat()) {
+          APInt apValue = attr.getSplatValue<APInt>();
+          int64_t indexValue = apValue.getSExtValue();
+          int64_t sourceDimSize = sourceType.getDimSize(i);
+          int64_t resultDimSize = resultType.getDimSize(i);
+          int64_t maxValidIndex = (resultDimSize / sourceDimSize) - 1;
+
+          // Warn for negative indices
+          if (indexValue < 0) {
+            mlir::emitWarning(getLoc())
+                << "insert index " << i << " has negative value " << indexValue
+                << ", which may cause undefined behavior";
+          }
+
+          // Warn for out-of-bounds indices
+          if (indexValue > maxValidIndex) {
+            mlir::emitWarning(getLoc())
+                << "insert index " << i << " value " << indexValue
                 << " may be out of bounds (max valid index: " << maxValidIndex
                 << ")";
           }
@@ -2313,6 +2577,16 @@ LogicalResult MmaFScaledOp::verify() {
   }
 
   // Check element types.
+  if (isa<Float8E5M3FNUType>(lhsScaleType.getElementType())) {
+    if (!isa<Float4E2M1FNType>(lhsType.getElementType())) {
+      return emitOpError(
+                 "unsupported combination of element types. Scale type ")
+             << lhsScaleType.getElementType()
+             << " expects lhs and rhs element types to be "
+             << Float4E2M1FNType::get(getContext()) << ", but got "
+             << lhsType.getElementType();
+    }
+  }
   if (isa<Float8E4M3FNType>(lhsScaleType.getElementType())) {
     if (!isa<Float4E2M1FNType>(lhsType.getElementType()))
       return emitOpError(
@@ -2376,6 +2650,16 @@ LogicalResult MmaFScaledOp::verify() {
                   "requires block scale factor of lhs_scale and rhs_scale "
                   "to be 16 or 32, but got "
                 << lhsScaleVecSize;
+      }
+    }
+    // F4 with UE5M3 scales can have vecSize=16 or 32 on SM107.
+    if (isa<Float8E5M3FNUType>(lhsScaleType.getElementType())) {
+      if (lhsScaleVecSize != 16 && lhsScaleVecSize != 32) {
+        return emitOpError()
+               << "shape error: f4E2M1FN element type with f8E5M3FNU scales "
+                  "requires block scale factor of lhs_scale and rhs_scale "
+                  "to be 16 or 32, but got "
+               << lhsScaleVecSize;
       }
     }
   }
@@ -2533,6 +2817,13 @@ LogicalResult ForOp::verifyRegions() {
            << indVar.getType() << " vs " << lowerBound.getType();
   }
 
+  // Verify that for loops do not contain return ops (even nested in regions)
+  auto result = getBody()->walk(
+      [&](ReturnOp returnOp) { return WalkResult::interrupt(); });
+  if (result.wasInterrupted()) {
+    return emitOpError("'for' loop cannot contain 'return' operations");
+  }
+
   return verifyLoopIterValues(*this, getResults(), getRegionIterValues());
 }
 
@@ -2639,23 +2930,107 @@ LogicalResult FToIOp::verify() {
 // FToFOp
 //===----------------------------------------------------------------------===//
 
+/// Returns true for low-precision float types (anything narrower than the
+/// smallest standard IEEE float, f16). Covers FP4, FP6, and FP8 formats.
+static bool isLowPrecisionFloatType(Type ty) {
+  return cast<FloatType>(ty).getWidth() < 16;
+}
+
+/// Returns true if every value in srcTy can be exactly represented in dstTy:
+/// at least as much precision and an exponent range that covers the source.
+static bool isStrictWidening(Type srcTy, Type dstTy) {
+  const llvm::fltSemantics &src = cast<FloatType>(srcTy).getFloatSemantics();
+  const llvm::fltSemantics &dst = cast<FloatType>(dstTy).getFloatSemantics();
+  return llvm::APFloat::semanticsPrecision(dst) >=
+             llvm::APFloat::semanticsPrecision(src) &&
+         llvm::APFloat::semanticsMaxExponent(dst) >=
+             llvm::APFloat::semanticsMaxExponent(src) &&
+         llvm::APFloat::semanticsMinExponent(dst) <=
+             llvm::APFloat::semanticsMinExponent(src);
+}
+
 LogicalResult FToFOp::verify() {
   if (getFrom().getType() == getTo().getType()) {
     return emitOpError("converting tiles must not be a no-op");
   }
   auto rounding = getRoundingMode();
-  if (isa<Float8E8M0FNUType>(getTo().getType().getElementType())) {
+  auto srcElemTy = getFrom().getType().getElementType();
+  auto dstElemTy = getTo().getType().getElementType();
+
+  // Enforce the float rounding rules in order. See the FToFOp table in
+  // tile_ir/include/cuda_tile/Dialect/CudaTile/IR/Ops.td. The first matching
+  // rule is applied.
+
+  // Rule 1: Conversion to f8E8M0FNU — only ZERO and POSITIVE_INF.
+  if (isa<Float8E8M0FNUType>(dstElemTy)) {
     if (!llvm::is_contained({RoundingMode::ZERO, RoundingMode::POSITIVE_INF},
                             rounding)) {
       return emitOpError(
           "invalid rounding mode specified for conversion to f8E8M0FNU. Only "
           "'zero' and 'positive_inf' are supported");
     }
-  } else {
+    return success();
+  }
+
+  // Rule 2: Conversion to other low-precision types — only NEAREST_EVEN.
+  if (isLowPrecisionFloatType(dstElemTy)) {
     if (rounding != RoundingMode::NEAREST_EVEN) {
       return emitOpError(
-          "invalid rounding mode specified. Only 'nearest_even' is supported");
+          "invalid rounding mode specified for conversion to low-precision "
+          "type. Only 'nearest_even' is supported");
     }
+    return success();
+  }
+
+  // Rule 3: Strict widenings — any IEEE float rounding mode is valid
+  // (no rounding actually occurs since source is exactly representable).
+  if (isStrictWidening(srcElemTy, dstElemTy)) {
+    if (!llvm::is_contained({RoundingMode::NEAREST_EVEN, RoundingMode::ZERO,
+                             RoundingMode::NEGATIVE_INF,
+                             RoundingMode::POSITIVE_INF,
+                             RoundingMode::NEAREST_AWAY},
+                            rounding)) {
+      return emitOpError("invalid rounding mode specified for widening "
+                         "conversion. Only IEEE float rounding modes are "
+                         "supported: 'nearest_even', 'zero', 'negative_inf', "
+                         "'positive_inf', 'nearest_away'");
+    }
+    return success();
+  }
+
+  // Rule 4: F64 → F32 narrowing.
+  if (srcElemTy.isF64() && dstElemTy.isF32()) {
+    if (!llvm::is_contained({RoundingMode::NEAREST_EVEN, RoundingMode::ZERO,
+                             RoundingMode::NEGATIVE_INF,
+                             RoundingMode::POSITIVE_INF},
+                            rounding)) {
+      return emitOpError(
+          "invalid rounding mode specified for conversion from f64 to f32. "
+          "Only 'nearest_even', 'zero', 'negative_inf', and 'positive_inf' "
+          "are supported");
+    }
+    return success();
+  }
+
+  // Rule 5: F32 → TF32 narrowing.
+  if (srcElemTy.isF32() && dstElemTy.isTF32()) {
+    if (!llvm::is_contained({RoundingMode::NEAREST_EVEN, RoundingMode::ZERO,
+                             RoundingMode::NEAREST_AWAY},
+                            rounding)) {
+      return emitOpError(
+          "invalid rounding mode specified for conversion from f32 to tf32. "
+          "Only 'nearest_even', 'zero', and 'nearest_away' are supported");
+    }
+    return success();
+  }
+
+  // Rule 6: Other narrowing to standard types — NEAREST_EVEN and ZERO.
+  // (Low-precision destinations were handled by rules 1 and 2.)
+  if (!llvm::is_contained({RoundingMode::NEAREST_EVEN, RoundingMode::ZERO},
+                          rounding)) {
+    return emitOpError(
+        "invalid rounding mode specified. Only 'nearest_even' and "
+        "'zero' are supported for narrowing conversions to standard types");
   }
   return success();
 }
@@ -2663,8 +3038,6 @@ LogicalResult FToFOp::verify() {
 //===----------------------------------------------------------------------===//
 // EntryOp
 //===----------------------------------------------------------------------===//
-
-constexpr char kOptimizationHintsAttr[] = "optimization_hints";
 
 ParseResult EntryOp::parse(OpAsmParser &parser, OperationState &result) {
   // Parse the name as a symbol.
@@ -2704,15 +3077,22 @@ ParseResult EntryOp::parse(OpAsmParser &parser, OperationState &result) {
   result.addAttribute(getArgAttrsAttrName(result.name),
                       ArrayAttr::get(parser.getContext(), argAttrs));
 
-  // Parse OptimizationHints attribute
+  // Parse OptimizationHints attribute. An explicit empty form
+  // is semantically identical to having no attribute at all.
+  // Normalize it away here so the in-memory IR has a single canonical
+  // shape and bytecode round-trip is stable. The printer already elides the
+  // empty form.
   if (succeeded(parser.parseOptionalKeyword(kOptimizationHintsAttr))) {
     if (parser.parseEqual())
       return failure();
-    Attribute opt_hint = OptimizationHintsAttr::parse(parser, Type{});
-    if (opt_hint)
-      result.addAttribute(getOptimizationHintsAttrName(result.name), opt_hint);
-    else
+    auto opt_hint = dyn_cast_or_null<OptimizationHintsAttr>(
+        OptimizationHintsAttr::parse(parser, Type{}));
+    if (!opt_hint) {
       return failure();
+    }
+    if (!opt_hint.getValue().empty()) {
+      result.addAttribute(getOptimizationHintsAttrName(result.name), opt_hint);
+    }
   }
 
   // Parse the function body.
@@ -2865,9 +3245,13 @@ LogicalResult IfOp::verify() {
       return emitOpError("has non-empty return type, must define else branch");
 
     // empty else block with no expected yield, nothing to check
-    return success();
+    return verifyOptHintsCommon(this);
   }
-  return checkRegionYieldTypes(elseRegion, "else");
+  LogicalResult elseCheck = checkRegionYieldTypes(elseRegion, "else");
+  if (failed(elseCheck)) {
+    return elseCheck;
+  }
+  return verifyOptHintsCommon(this);
 }
 
 Block *IfOp::getThenBlock() { return &getThenRegion().back(); }
@@ -3603,14 +3987,41 @@ cuda_tile::impl::verifyMemoryModelLoad(Operation *op,
 
 namespace {
 
+/// Parse the trailing `attributes { ... }` keyword-attr dict and reject any
+/// attribute whose name appears in `reservedKeys`. Reserved keys are those the
+/// corresponding printer emits explicitly (and elides from the trailing dict);
+/// allowing them through the trailing dict would let mixed spellings duplicate
+/// or override the canonical values once the parser merges attrs onto the op.
+ParseResult
+parseAttrDictRejectingReservedKeys(OpAsmParser &parser,
+                                   NamedAttrList &attributes,
+                                   ArrayRef<StringRef> reservedKeys) {
+  SMLoc loc = parser.getCurrentLocation();
+  if (parser.parseOptionalAttrDictWithKeyword(attributes)) {
+    return failure();
+  }
+  for (StringRef key : reservedKeys) {
+    if (attributes.get(key)) {
+      return parser.emitError(loc)
+             << "attribute '" << key
+             << "' is reserved and may not appear in the trailing "
+                "`attributes { ... }` dict; it is printed explicitly and "
+                "must be set via the canonical syntax instead";
+    }
+  }
+  return success();
+}
+
 /// Parse common elements for LoadViewTkoOp and StoreViewTkoOp:
 /// - Optional token
 /// - Optional optimization_hints
+/// - Optional inbounds = [true, false, ...]
 /// - Optional attribute dict
-/// Returns the parsed OptimizationHintsAttr and whether a token was found.
 ParseResult parseViewTkoCommon(OpAsmParser &parser, NamedAttrList &attributes,
                                OptimizationHintsAttr &optHints, bool &hasToken,
-                               OpAsmParser::UnresolvedOperand &token) {
+                               OpAsmParser::UnresolvedOperand &token,
+                               DenseBoolArrayAttr &inbounds,
+                               SMLoc &boundAttributeLoc) {
   // Parse optional token
   hasToken = succeeded(parser.parseOptionalKeyword("token"));
   if (hasToken && (parser.parseEqual() || parser.parseOperand(token)))
@@ -3626,9 +4037,46 @@ ParseResult parseViewTkoCommon(OpAsmParser &parser, NamedAttrList &attributes,
     optHints = cast<OptimizationHintsAttr>(parsedAttr);
   }
 
-  // Parse attributes
-  if (parser.parseOptionalAttrDictWithKeyword(attributes))
+  // Parse optional `inbounds = [true, false, ...]`.
+  if (succeeded(parser.parseOptionalKeyword("inbounds"))) {
+    if (parser.parseEqual()) {
+      return failure();
+    }
+    boundAttributeLoc = parser.getCurrentLocation();
+    SmallVector<bool> values;
+    if (parser.parseCommaSeparatedList(
+            OpAsmParser::Delimiter::Square, [&]() -> ParseResult {
+              StringRef tok;
+              auto loc = parser.getCurrentLocation();
+              if (parser.parseKeyword(&tok)) {
+                return failure();
+              }
+              if (tok == "true") {
+                values.push_back(true);
+              } else if (tok == "false") {
+                values.push_back(false);
+              } else {
+                return parser.emitError(loc)
+                       << "expected 'true' or 'false' in inbounds list, "
+                          "got '"
+                       << tok << "'";
+              }
+              return success();
+            })) {
+      return failure();
+    }
+    inbounds = parser.getBuilder().getDenseBoolArrayAttr(values);
+  }
+
+  // Parse attributes. Reject reserved keys that the printer emits explicitly
+  // (see printViewTkoOptionals) so they cannot be smuggled through the trailing
+  // `attributes { ... }` dict and override the canonical fields.
+  if (parseAttrDictRejectingReservedKeys(parser, attributes,
+                                         {"memory_ordering_semantics",
+                                          "memory_scope", "optimization_hints",
+                                          "operandSegmentSizes", "inbounds"})) {
     return failure();
+  }
 
   return success();
 }
@@ -3668,45 +4116,97 @@ ParseResult parseIndexTypes(OpAsmParser &parser,
   return success();
 }
 
+/// Bundle of parser state shared between `LoadViewTkoOp::parse` /
+/// `StoreViewTkoOp::parse`.
+struct ViewTkoParseState {
+  // Operands.
+  ArrayRef<OpAsmParser::UnresolvedOperand> indices;
+  ArrayRef<Type> indexTypes;
+  bool hasToken = false;
+  OpAsmParser::UnresolvedOperand token;
+
+  // Memory-model attributes. `memSemantics` is required; `memScope` is set
+  // only for non-`weak` orderings.
+  MemoryOrderingSemanticsAttr memSemantics;
+  MemoryScopeAttr memScope;
+
+  // Other optional attributes parsed by `parseViewTkoCommon`.
+  OptimizationHintsAttr optHints;
+  DenseBoolArrayAttr inbounds;
+
+  // Trailing optional attribute dict of the form `attributes { ... }`.
+  NamedAttrList attributes;
+
+  // operandSegmentSizes payload for the op's AttrSizedOperandSegments.
+  // Owned so callers can pass a brace-enclosed list without lifetime worries.
+  SmallVector<int32_t, 4> segmentSizes;
+
+  // Source locations used for diagnostics about index-type / inbounds
+  // mismatches.
+  SMLoc typeLoc;
+  SMLoc boundAttributeLoc;
+  SMLoc indicesLoc;
+};
+
 /// Finalize parsing by resolving operands and setting attributes.
-ParseResult finalizeViewTkoParse(
-    OpAsmParser &parser, OperationState &result,
-    ArrayRef<OpAsmParser::UnresolvedOperand> indices, ArrayRef<Type> indexTypes,
-    bool hasToken, const OpAsmParser::UnresolvedOperand &token,
-    MemoryOrderingSemanticsAttr memSemantics, MemoryScopeAttr memScope,
-    OptimizationHintsAttr optHints, const NamedAttrList &attributes,
-    SMLoc typeLoc, ArrayRef<int32_t> segmentSizes) {
+ParseResult finalizeViewTkoParse(OpAsmParser &parser, OperationState &result,
+                                 const ViewTkoParseState &parsed) {
   // Ensure we have the right number of index types
-  if (!indices.empty() && indexTypes.empty())
-    return parser.emitError(parser.getCurrentLocation())
+  if (!parsed.indices.empty() && parsed.indexTypes.empty()) {
+    return parser.emitError(parsed.indicesLoc)
            << "index types must be specified when indices are present";
+  }
 
-  if (!indexTypes.empty() && indexTypes.size() != indices.size())
-    return parser.emitError(typeLoc)
-           << "expected " << indices.size() << " index types, got "
-           << indexTypes.size();
+  if (!parsed.indexTypes.empty() &&
+      parsed.indexTypes.size() != parsed.indices.size()) {
+    return parser.emitError(parsed.typeLoc)
+           << "expected " << parsed.indices.size() << " index types, got "
+           << parsed.indexTypes.size();
+  }
 
-  if (parser.resolveOperands(indices, indexTypes, parser.getCurrentLocation(),
-                             result.operands))
+  if (parsed.inbounds &&
+      static_cast<size_t>(parsed.inbounds.size()) != parsed.indices.size()) {
+    return parser.emitError(parsed.boundAttributeLoc)
+           << "inbounds size (" << parsed.inbounds.size()
+           << ") must match the number of index dimensions ("
+           << parsed.indices.size() << ")";
+  }
+
+  if (parser.resolveOperands(parsed.indices, parsed.indexTypes,
+                             parser.getCurrentLocation(), result.operands)) {
     return failure();
+  }
 
-  if (hasToken && parser.resolveOperand(
-                      token, cuda_tile::TokenType::get(parser.getContext()),
-                      result.operands)) {
+  if (parsed.hasToken &&
+      parser.resolveOperand(parsed.token,
+                            cuda_tile::TokenType::get(parser.getContext()),
+                            result.operands)) {
     return failure();
   }
 
   // Set attributes
-  result.addAttribute("memory_ordering_semantics", memSemantics);
-  if (memScope)
-    result.addAttribute("memory_scope", memScope);
-  if (optHints)
-    result.addAttribute("optimization_hints", optHints);
-  result.addAttributes(attributes);
+  result.addAttribute("memory_ordering_semantics", parsed.memSemantics);
+  if (parsed.memScope) {
+    result.addAttribute("memory_scope", parsed.memScope);
+  }
+  if (parsed.optHints) {
+    result.addAttribute("optimization_hints", parsed.optHints);
+  }
+  // The `inbounds` attribute is required; if the user omitted the textual
+  // `inbounds = [...]` clause, synthesize an all-`false` vector sized to the
+  // index rank (every dimension is conservatively out-of-bounds).
+  DenseBoolArrayAttr inbounds = parsed.inbounds;
+  if (!inbounds) {
+    inbounds = parser.getBuilder().getDenseBoolArrayAttr(
+        SmallVector<bool>(parsed.indices.size(), /*value=*/false));
+  }
+  result.addAttribute("inbounds", inbounds);
+  result.addAttributes(parsed.attributes);
 
   // Set operand segment sizes
-  result.addAttribute("operandSegmentSizes",
-                      parser.getBuilder().getDenseI32ArrayAttr(segmentSizes));
+  result.addAttribute(
+      "operandSegmentSizes",
+      parser.getBuilder().getDenseI32ArrayAttr(parsed.segmentSizes));
 
   return success();
 }
@@ -3734,10 +4234,26 @@ void printViewTkoOptionals(OpAsmPrinter &p, OpType op) {
     op.getOptimizationHintsAttr().print(p);
   }
 
-  // Print attributes
-  p.printOptionalAttrDictWithKeyword(
-      op->getAttrs(), {"memory_ordering_semantics", "memory_scope",
-                       "optimization_hints", "operandSegmentSizes"});
+  // Print inbounds in `[true, false, ...]` form. The attribute is required
+  // and always present in the IR (synthesized by the parser as all-`false`
+  // when the textual `inbounds = [...]` clause is omitted), and the
+  // bytecode writer always encodes it. In the textual form, however, we
+  // elide the clause when every element is `false`: that is the value the
+  // parser synthesizes for an omitted clause, so a printed-then-reparsed IR
+  // is preserved unchanged.
+  ArrayRef<bool> inbounds = op.getInbounds();
+  if (llvm::any_of(inbounds, [](bool v) { return v; })) {
+    p << " inbounds = [";
+    llvm::interleaveComma(inbounds, p,
+                          [&](bool v) { p << (v ? "true" : "false"); });
+    p << "]";
+  }
+
+  // Print attributes (eliding the ones we printed explicitly above)
+  p.printOptionalAttrDictWithKeyword(op->getAttrs(),
+                                     {"memory_ordering_semantics",
+                                      "memory_scope", "optimization_hints",
+                                      "operandSegmentSizes", "inbounds"});
 }
 
 /// Print index types (splat or individual).
@@ -3827,9 +4343,15 @@ ParseResult cuda_tile::AtomicRedViewTkoOp::parse(OpAsmParser &parser,
     return failure();
   }
 
-  // Parse optional attr-dict
+  // Parse optional attr-dict. Reject reserved keys that the printer emits
+  // explicitly (see AtomicRedViewTkoOp::print) so they cannot be smuggled
+  // through the trailing `attributes { ... }` dict and override the canonical
+  // fields.
   NamedAttrList attributes;
-  if (parser.parseOptionalAttrDictWithKeyword(attributes)) {
+  if (parseAttrDictRejectingReservedKeys(parser, attributes,
+                                         {"memory_ordering_semantics",
+                                          "memory_scope", "mode",
+                                          "operandSegmentSizes"})) {
     return failure();
   }
 
@@ -3944,8 +4466,11 @@ ParseResult cuda_tile::LoadViewTkoOp::parse(OpAsmParser &parser,
   OpAsmParser::UnresolvedOperand token;
   NamedAttrList attributes;
   OptimizationHintsAttr optHints;
+  DenseBoolArrayAttr inbounds;
   bool hasToken = false;
   SMLoc typeLoc;
+  SMLoc boundAttributeLoc;
+  SMLoc indicesLoc;
 
   // Parse memory attributes
   MemoryOrderingSemanticsAttr memSemantics;
@@ -3954,13 +4479,19 @@ ParseResult cuda_tile::LoadViewTkoOp::parse(OpAsmParser &parser,
     return failure();
 
   // Parse view and indices
-  if (parser.parseOperand(view) || parser.parseLSquare() ||
-      parser.parseOperandList(indices) || parser.parseRSquare())
+  if (parser.parseOperand(view) || parser.parseLSquare()) {
     return failure();
+  }
+  indicesLoc = parser.getCurrentLocation();
+  if (parser.parseOperandList(indices) || parser.parseRSquare()) {
+    return failure();
+  }
 
   // Parse common optional elements
-  if (parseViewTkoCommon(parser, attributes, optHints, hasToken, token))
+  if (parseViewTkoCommon(parser, attributes, optHints, hasToken, token,
+                         inbounds, boundAttributeLoc)) {
     return failure();
+  }
 
   // Parse types: : view_type, index_types... -> result_type, token_type
   if (parser.parseColon())
@@ -3987,11 +4518,25 @@ ParseResult cuda_tile::LoadViewTkoOp::parse(OpAsmParser &parser,
     return failure();
 
   // Finalize parsing
-  if (finalizeViewTkoParse(
-          parser, result, indices, indexTypes, hasToken, token, memSemantics,
-          memScope, optHints, attributes, typeLoc,
-          {1, static_cast<int32_t>(indices.size()), hasToken ? 1 : 0}))
+  ViewTkoParseState parsed{
+      /*indices=*/indices,
+      /*indexTypes=*/indexTypes,
+      /*hasToken=*/hasToken,
+      /*token=*/token,
+      /*memSemantics=*/memSemantics,
+      /*memScope=*/memScope,
+      /*optHints=*/optHints,
+      /*inbounds=*/inbounds,
+      /*attributes=*/std::move(attributes),
+      /*segmentSizes=*/
+      {1, static_cast<int32_t>(indices.size()), hasToken ? 1 : 0},
+      /*typeLoc=*/typeLoc,
+      /*boundAttributeLoc=*/boundAttributeLoc,
+      /*indicesLoc=*/indicesLoc,
+  };
+  if (finalizeViewTkoParse(parser, result, parsed)) {
     return failure();
+  }
 
   // Set result types
   result.types.push_back(resultType);
@@ -4027,6 +4572,16 @@ void cuda_tile::LoadViewTkoOp::print(OpAsmPrinter &p) {
 LogicalResult LoadViewTkoOp::verify() {
   if (failed(verifyViewLoadStoreCommon(this)))
     return failure();
+  if (failed(verifyUnrestrictedViewPtrAttr(*this, getView()))) {
+    return failure();
+  }
+
+  ArrayRef<bool> inbounds = getInbounds();
+  if (inbounds.size() != getIndex().size()) {
+    return emitOpError("inbounds size (")
+           << inbounds.size() << ") must match the number of index dimensions ("
+           << getIndex().size() << ")";
+  }
 
   return impl::verifyMemoryModelLoad(*this, getMemoryOrderingSemantics(),
                                      getMemoryScope());
@@ -4201,29 +4756,104 @@ ParseResult cuda_tile::MakeTensorViewOp::parse(OpAsmParser &parser,
       parser.parseOptionalAttrDict(attributes) || parser.parseColon())
     return ParseResult::failure();
 
-  Type indexType;
-  if (!unresolvedDynShapeOperands.empty() ||
-      !unresolvedDynStrideOperands.empty()) {
-    if (parseCudaTileType(parser, indexType) || parser.parseArrow())
-      return ParseResult::failure();
+  // Parse the type section after ':'.
+  //
+  // Pointer base with an explicit dynamic-index type:
+  //   `: type($base) , type($index) -> type($result)`
+  //
+  // Pointer base without dynamic index type printed (only when the
+  // tensor_view has no `?` shape or stride dimensions):
+  //   `: type($base) -> type($result)`
+  //
+  // Otherwise the first type is the dynamic index tile or the tensor_view
+  // alone:
+  //   `: type(index) -> type($result)` or `: type($result)`
+  Type firstType;
+  if (parseCudaTileType(parser, firstType)) {
+    return ParseResult::failure();
   }
 
-  Type maybeTensorViewType;
-  if (parseCudaTileType(parser, maybeTensorViewType))
-    return ParseResult::failure();
+  Type basePtrType;
+  Type indexType;
+  cuda_tile::TensorViewType tensorView;
 
-  cuda_tile::TensorViewType tensorView =
-      llvm::dyn_cast<TensorViewType>(maybeTensorViewType);
+  if (auto tileType = dyn_cast<cuda_tile::TileType>(firstType)) {
+    Type elemType = tileType.getElementType();
+    // Rank-0 tile of pointer:
+    // - `base, index -> result` (comma before `->`): `base` is the pointer
+    // tile,
+    //   `index` is the dynamic shape/stride element type.
+    // - `base -> result` with no comma: if `result` has no dynamic shape or
+    //   stride, `base` is the pointer tile (e.g. `tile<ptr<..., none>>` with a
+    //   static tensor_view). Otherwise keep legacy behavior where the first
+    //   type was treated as the dynamic-index tile type (invalid IR such as
+    //   `tile<ptr<f64>> -> tensor_view<?x...>` is diagnosed in verify).
+    if (isa<cuda_tile::PointerType>(elemType)) {
+      if (succeeded(parser.parseOptionalComma())) {
+        basePtrType = firstType;
+        if (parseCudaTileType(parser, indexType)) {
+          return ParseResult::failure();
+        }
+        if (parser.parseArrow()) {
+          return ParseResult::failure();
+        }
+        Type resultType;
+        if (parseCudaTileType(parser, resultType)) {
+          return ParseResult::failure();
+        }
+        tensorView = dyn_cast<TensorViewType>(resultType);
+      } else {
+        if (parser.parseArrow()) {
+          return ParseResult::failure();
+        }
+        Type resultType;
+        if (parseCudaTileType(parser, resultType)) {
+          return ParseResult::failure();
+        }
+        tensorView = dyn_cast<TensorViewType>(resultType);
+        if (tensorView && tensorView.dynamicShapeAmount() == 0 &&
+            tensorView.dynamicStrideAmount() == 0) {
+          basePtrType = firstType;
+        } else {
+          indexType = firstType;
+        }
+      }
+    } else {
+      // Index type (e.g. tile<i32>) for dynamic shapes/strides.
+      indexType = firstType;
+      if (parser.parseArrow()) {
+        return ParseResult::failure();
+      }
+      Type resultType;
+      if (parseCudaTileType(parser, resultType)) {
+        return ParseResult::failure();
+      }
+      tensorView = dyn_cast<TensorViewType>(resultType);
+    }
+  } else if (auto tvType = dyn_cast<TensorViewType>(firstType)) {
+    // No dynamic shapes/strides: the first type is the result tensor_view
+    // directly (no index type, no arrow).
+    tensorView = tvType;
+  }
+
   if (!tensorView)
     return parser.emitError(parser.getCurrentLocation())
-           << "expected 'tensor_view' type, but got " << maybeTensorViewType;
+           << "expected 'tensor_view' type, but got " << firstType;
 
-  if (parser.resolveOperand(
-          basePtrOperand,
-          cuda_tile::TileType::get(
-              {}, cuda_tile::PointerType::get(tensorView.getElementType())),
-          result.operands))
+  if (!basePtrType) {
+    // Base type not printed; infer `tile<ptr<elem>>` from the tensor_view
+    // element type only. Do not copy `tensor_view`'s ptr_attr onto the
+    // inferred pointer: the operand may be `tile<ptr<elem>>` without ptr_attr,
+    // and MakeTensorViewOp::verify checks ptr_attr consistency between base
+    // and result.
+    Type elemTy = tensorView.getElementType();
+    basePtrType =
+        cuda_tile::TileType::get({}, cuda_tile::PointerType::get(elemTy));
+  }
+
+  if (parser.resolveOperand(basePtrOperand, basePtrType, result.operands)) {
     return ParseResult::failure();
+  }
 
   auto compareAndDiagnostic =
       [&](ArrayRef<std::tuple<int64_t, SMLoc>> fromOperands,
@@ -4321,25 +4951,73 @@ void cuda_tile::MakeTensorViewOp::print(OpAsmPrinter &p) {
   p.printOptionalAttrDict(getOperation()->getAttrs(), {"operandSegmentSizes"});
   p << " : ";
 
-  if (!getDynamicShape().empty() || !getDynamicStrides().empty()) {
-    Type dynamicType = !getDynamicShape().empty()
-                           ? getDynamicShape().getTypes().front()
-                           : getDynamicStrides().getTypes().front();
-    printCudaTileType(p, dynamicType);
+  Type baseElem = getBase().getType().getElementType();
+  bool printExplicitBase = false;
+  if (auto pe = dyn_cast<cuda_tile::PointerType>(baseElem)) {
+    if (auto pa = pe.getPtrAttr()) {
+      cuda_tile::PtrAttr v = pa.getValue();
+      if (v == cuda_tile::PtrAttr::NONE) {
+        printExplicitBase = true;
+      }
+    }
+  }
+  if (printExplicitBase) {
+    printCudaTileType(p, getBase().getType());
+    if (!getDynamicShape().empty() || !getDynamicStrides().empty()) {
+      p << ", ";
+      Type dynamicType = !getDynamicShape().empty()
+                             ? getDynamicShape().getTypes().front()
+                             : getDynamicStrides().getTypes().front();
+      printCudaTileType(p, dynamicType);
+    }
     p << " -> ";
+  } else {
+    if (!getDynamicShape().empty() || !getDynamicStrides().empty()) {
+      Type dynamicType = !getDynamicShape().empty()
+                             ? getDynamicShape().getTypes().front()
+                             : getDynamicStrides().getTypes().front();
+      printCudaTileType(p, dynamicType);
+      p << " -> ";
+    }
   }
 
   printCudaTileType(p, getResult().getType());
 }
 
 LogicalResult cuda_tile::MakeTensorViewOp::verify() {
-  Type baseElementType =
-      llvm::cast<cuda_tile::PointerType>(getBase().getType().getElementType())
-          .getPointeeType();
-  if (getResult().getType().getElementType() != baseElementType)
+  Type baseElemType = getBase().getType().getElementType();
+  Type basePointeeType;
+  cuda_tile::PtrAttrAttr basePtrAttr{};
+
+  if (auto ptrTy = dyn_cast<cuda_tile::PointerType>(baseElemType)) {
+    basePointeeType = ptrTy.getPointeeType();
+    basePtrAttr = ptrTy.getPtrAttr();
+  } else {
+    return emitOpError("expected base to be a pointer type, got ")
+           << baseElemType;
+  }
+
+  if (getResult().getType().getElementType() != basePointeeType) {
     return emitOpError("expected pointer to ")
            << getResult().getType().getElementType()
-           << " to build tensor_view of this type, got " << baseElementType;
+           << " to build tensor_view of this type, got " << basePointeeType;
+  }
+
+  // Verify PtrAttr consistency between base pointer and result tensor_view.
+  auto resultPtrAttr = getResult().getType().getPtrAttr();
+  if (basePtrAttr && !resultPtrAttr) {
+    return emitOpError("tensor_view must preserve ptr_attr from base pointer (")
+           << basePtrAttr << ")";
+  }
+  if (!basePtrAttr && resultPtrAttr) {
+    return emitOpError("pointer base without ptr_attr cannot produce "
+                       "tensor_view with ptr_attr");
+  }
+  if (basePtrAttr && resultPtrAttr && basePtrAttr != resultPtrAttr) {
+    return emitOpError("ptr_attr mismatch between base pointer (")
+           << basePtrAttr << ") and result tensor_view (" << resultPtrAttr
+           << ")";
+  }
 
   if (getResult().getType().dynamicShapeAmount() != getDynamicShape().size())
     return emitOpError("expected ")
@@ -4575,6 +5253,12 @@ void cuda_tile::ModuleOp::build(OpBuilder &builder, OperationState &result,
 }
 
 LogicalResult cuda_tile::ModuleOp::verify() {
+  for (Operation &op : getBody().front()) {
+    if (!isa<SymbolOpInterface>(&op)) {
+      return op.emitOpError(
+          "non-symbol operations are not allowed in a module body");
+    }
+  }
   if (failed(DebugInfoVerifier::verifyModule(*this)))
     return failure();
   return success();
@@ -4697,6 +5381,32 @@ LogicalResult PermuteOp::verify() {
                            << ", but got: " << resultShape[idx];
     }
   }
+  return success();
+}
+
+LogicalResult PermuteOp::inferReturnTypes(
+    MLIRContext * /*context*/, std::optional<Location> /*location*/,
+    ValueRange operands, DictionaryAttr /*attributes*/, PropertyRef properties,
+    RegionRange /*regions*/, SmallVectorImpl<Type> &inferredReturnTypes) {
+  auto srcTy = dyn_cast<TileType>(operands[0].getType());
+  if (!srcTy) {
+    return failure();
+  }
+  auto *prop = properties.as<Properties *>();
+  auto permutation = prop->permutation.asArrayRef();
+  int64_t rank = srcTy.getRank();
+  if (static_cast<int64_t>(permutation.size()) != rank) {
+    return failure();
+  }
+  SmallVector<int64_t> permutedShape;
+  for (int32_t idx : permutation) {
+    if (idx < 0 || idx >= rank) {
+      return failure();
+    }
+    permutedShape.push_back(srcTy.getShape()[idx]);
+  }
+  inferredReturnTypes.push_back(
+      TileType::get(permutedShape, srcTy.getElementType()));
   return success();
 }
 
@@ -4833,13 +5543,14 @@ static LogicalResult verifyAggregateOpRegions(Operation *op, Region &region,
              << termTy.getElementType();
   }
 
-  auto isPureCudaTileOp = [](Operation *op) {
-    return isPure(op);
+  auto isMemEffectFreeCudaTileOp = [](Operation *op) {
+    return isMemoryEffectFree(op);
   };
 
   for (Operation &innerOp : block.without_terminator()) {
-    if (!isPureCudaTileOp(&innerOp)) {
-      return innerOp.emitOpError("only pure operations are allowed inside '")
+    if (!isMemEffectFreeCudaTileOp(&innerOp)) {
+      return innerOp.emitOpError(
+                 "only memory-effect-free operations are allowed inside '")
              << op->getName() << "'";
     }
   }
@@ -5010,6 +5721,12 @@ LogicalResult ReturnOp::verify() {
       parentOp = parentOp->getParentOp();
       continue;
     }
+    // Allow returns within loop operations (LoopOp).
+    // The return should escape the loop and return from the enclosing function
+    if (isa<LoopOp>(parentOp)) {
+      parentOp = parentOp->getParentOp();
+      continue;
+    }
     if (auto entryOp = dyn_cast<EntryOp>(parentOp)) {
       // The operand number and types must match the function signature.
       const auto &results = entryOp.getFunctionType().getResults();
@@ -5045,11 +5762,12 @@ LogicalResult ReturnOp::verify() {
     }
 #endif // TILE_IR_INCLUDE_TESTS
 
-    return emitOpError("must be used within a "
+    return emitOpError(
+        "must be used within a "
 #ifdef TILE_IR_INCLUDE_TESTS
-                       "cuda_tile.testing$func, "
+        "cuda_tile.testing$func, "
 #endif
-                       "cuda_tile.entry, or cuda_tile.if operation");
+        "cuda_tile.entry, cuda_tile.if, or cuda_tile.loop operation");
   } while (true);
 
   return success();
@@ -5348,7 +6066,7 @@ LogicalResult TanHOp::verify() {
   auto rounding = getRoundingMode();
   if (!llvm::is_contained({RoundingMode::FULL, RoundingMode::APPROX},
                           rounding)) {
-    emitOpError(
+    return emitOpError(
         "invalid rounding mode specified, expect one of [approx, full]");
   }
 
@@ -5411,8 +6129,11 @@ ParseResult cuda_tile::StoreViewTkoOp::parse(OpAsmParser &parser,
   OpAsmParser::UnresolvedOperand token;
   NamedAttrList attributes;
   OptimizationHintsAttr optHints;
+  DenseBoolArrayAttr inbounds;
   bool hasToken = false;
   SMLoc typeLoc;
+  SMLoc boundAttributeLoc;
+  SMLoc indicesLoc;
 
   // Parse memory attributes
   MemoryOrderingSemanticsAttr memSemantics;
@@ -5422,13 +6143,19 @@ ParseResult cuda_tile::StoreViewTkoOp::parse(OpAsmParser &parser,
 
   // Parse tile, view and indices
   if (parser.parseOperand(tile) || parser.parseComma() ||
-      parser.parseOperand(view) || parser.parseLSquare() ||
-      parser.parseOperandList(indices) || parser.parseRSquare())
+      parser.parseOperand(view) || parser.parseLSquare()) {
     return failure();
+  }
+  indicesLoc = parser.getCurrentLocation();
+  if (parser.parseOperandList(indices) || parser.parseRSquare()) {
+    return failure();
+  }
 
   // Parse common optional elements
-  if (parseViewTkoCommon(parser, attributes, optHints, hasToken, token))
+  if (parseViewTkoCommon(parser, attributes, optHints, hasToken, token,
+                         inbounds, boundAttributeLoc)) {
     return failure();
+  }
 
   // Parse types: : tile_type, view_type, index_types... -> token_type
   if (parser.parseColon())
@@ -5456,11 +6183,25 @@ ParseResult cuda_tile::StoreViewTkoOp::parse(OpAsmParser &parser,
     return failure();
 
   // Finalize parsing
-  if (finalizeViewTkoParse(
-          parser, result, indices, indexTypes, hasToken, token, memSemantics,
-          memScope, optHints, attributes, typeLoc,
-          {1, 1, static_cast<int32_t>(indices.size()), hasToken ? 1 : 0}))
+  ViewTkoParseState parsed{
+      /*indices=*/indices,
+      /*indexTypes=*/indexTypes,
+      /*hasToken=*/hasToken,
+      /*token=*/token,
+      /*memSemantics=*/memSemantics,
+      /*memScope=*/memScope,
+      /*optHints=*/optHints,
+      /*inbounds=*/inbounds,
+      /*attributes=*/std::move(attributes),
+      /*segmentSizes=*/
+      {1, 1, static_cast<int32_t>(indices.size()), hasToken ? 1 : 0},
+      /*typeLoc=*/typeLoc,
+      /*boundAttributeLoc=*/boundAttributeLoc,
+      /*indicesLoc=*/indicesLoc,
+  };
+  if (finalizeViewTkoParse(parser, result, parsed)) {
     return failure();
+  }
 
   // Set result type
   result.types.push_back(tokenType);
@@ -5497,6 +6238,17 @@ void cuda_tile::StoreViewTkoOp::print(OpAsmPrinter &p) {
 LogicalResult StoreViewTkoOp::verify() {
   if (failed(verifyViewLoadStoreCommon(this)))
     return failure();
+  if (failed(verifyUnrestrictedViewPtrAttr(*this, getView()))) {
+    return failure();
+  }
+
+  ArrayRef<bool> inbounds = getInbounds();
+  if (inbounds.size() != getIndex().size()) {
+    return emitOpError("inbounds size (")
+           << inbounds.size() << ") must match the number of index dimensions ("
+           << getIndex().size() << ")";
+  }
+
   return impl::verifyMemoryModelStore(*this, getMemoryOrderingSemantics(),
                                       getMemoryScope());
 }

@@ -463,74 +463,48 @@ cuda_tile.module @log2_invalid_f8_element {
 
 // -----
 
-// ****************** cuda_tile.pow ******************
-cuda_tile.module @pow_mismatching_rank_inputs {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<1x2x4x8xf32>) {
-        // expected-error @below{{use of value '%arg1' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xf32>
+// ****************** cuda_tile.fpowf ******************
+cuda_tile.module @fpowf_invalid_int_base {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xi32>) {
+        // expected-error @below{{'cuda_tile.fpowf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xi32>'}}
+        %0 = cuda_tile.fpowf %arg0, %arg0 : !cuda_tile.tile<2x4x8xi32>
     }
 }
 
 // -----
 
-cuda_tile.module @pow_mismatching_rank_input_output {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{use of value '%arg0' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<1x2x4x8xf32>
+cuda_tile.module @fpowf_invalid_f8_element {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf8E5M2>) {
+        // expected-error @below{{'cuda_tile.fpowf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xf8E5M2>'}}
+        %0 = cuda_tile.fpowf %arg0, %arg0 : !cuda_tile.tile<2x4x8xf8E5M2>
     }
 }
 
 // -----
 
-cuda_tile.module @pow_mismatching_shape_inputs {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x8x4xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{use of value '%arg0' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xf32>
+// ****************** cuda_tile.fpowi ******************
+cuda_tile.module @fpowi_mismatching_shape_source_exponent {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x8x4xi32>) {
+        // expected-error @below{{'cuda_tile.fpowi' op failed to verify that all of {source, exponent} have same shape}}
+        %0 = cuda_tile.fpowi %arg0, %arg1 : !cuda_tile.tile<2x4x8xf32>, !cuda_tile.tile<2x8x4xi32>
     }
 }
 
 // -----
 
-cuda_tile.module @pow_mismatching_shape_input_output {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{use of value '%arg0' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<4x2x8xf32>
+cuda_tile.module @fpowi_invalid_int_base {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xi32>) {
+        // expected-error @below{{'cuda_tile.fpowi' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xi32>'}}
+        %0 = cuda_tile.fpowi %arg0, %arg0 : !cuda_tile.tile<2x4x8xi32>, !cuda_tile.tile<2x4x8xi32>
     }
 }
 
 // -----
 
-cuda_tile.module @pow_mismatching_elementtype_inputs {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf16>) {
-        // expected-error @below{{use of value '%arg1' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xf32>
-    }
-}
-
-// -----
-
-cuda_tile.module @pow_mismatching_elementtype_input_output {// expected-note @below{{prior use here}}
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{use of value '%arg0' expects different type than prior uses}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xf16>
-    }
-}
-
-// -----
-
-cuda_tile.module @pow_invalid_int_element {
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xi32>, %arg1: !cuda_tile.tile<2x4x8xi32>) {
-        // expected-error @below{{'cuda_tile.pow' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xi32>'}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xi32>
-    }
-}
-
-// -----
-
-cuda_tile.module @pow_invalid_f8_element {
-    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf8E5M2>, %arg1: !cuda_tile.tile<2x4x8xf8E5M2>) {
-        // expected-error @below{{'cuda_tile.pow' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<2x4x8xf8E5M2>'}}
-        %0 = cuda_tile.pow %arg0, %arg1 : !cuda_tile.tile<2x4x8xf8E5M2>
+cuda_tile.module @fpowi_invalid_i64_exponent {
+    cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xi64>) {
+        // expected-error @below{{'cuda_tile.fpowi' op operand #1 must be tile of i1 or i8 or i16 or i32 values, but got '!cuda_tile.tile<2x4x8xi64>'}}
+        %0 = cuda_tile.fpowi %arg0, %arg1 : !cuda_tile.tile<2x4x8xf32>, !cuda_tile.tile<2x4x8xi64>
     }
 }
 

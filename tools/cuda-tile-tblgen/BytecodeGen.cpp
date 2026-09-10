@@ -280,7 +280,7 @@ static void generateFlagsFieldSerialization(const Operator &op,
       size_t bitPos = bitAssignments.lookup(attrName);
 
         auto [majorStr, minorStr] = extractVersionFromAttribute(namedAttr, op);
-        std::string version = majorStr + "." + minorStr;
+        std::string version = (Twine(majorStr) + "." + minorStr).str();
 
         if (version == opVersion) {
           // Attribute from original operation - simple flag setting.
@@ -320,7 +320,7 @@ static void generateFlagsFieldSerialization(const Operator &op,
         // Validate that required operands were introduced with the operation
         // itself.
         auto [majorStr, minorStr] = extractVersionFromOperand(operandIndex, op);
-        std::string version = majorStr + "." + minorStr;
+        std::string version = (Twine(majorStr) + "." + minorStr).str();
         if (version != opVersion)
           PrintFatalError("Required operand '" + odsOperand.name.str() +
                           "' in operation '" + op.getOperationName() +
@@ -336,7 +336,7 @@ static void generateFlagsFieldSerialization(const Operator &op,
 
           auto [majorStr, minorStr] =
               extractVersionFromOperand(operandIndex, op);
-          std::string version = majorStr + "." + minorStr;
+          std::string version = (Twine(majorStr) + "." + minorStr).str();
 
           if (version == opVersion) {
             // Operand from original operation - no version checking needed.
@@ -450,7 +450,8 @@ static void generateAttributeSerialization(const Operator &op,
       // validation.
         auto [majorStr, minorStr] = extractVersionFromAttribute(namedAttr, op);
         auto defaultValue = extractDefaultValue(namedAttr);
-        std::string version = majorStr + "." + minorStr;
+        auto sameOperandRank = extractSameOperandRankName(namedAttr, op);
+        std::string version = (Twine(majorStr) + "." + minorStr).str();
 
         os << llvm::formatv(R"(
   auto requiredVersionFor_{0} = BytecodeVersion::fromVersion({1}, {2}, 0);
@@ -470,6 +471,18 @@ static void generateAttributeSerialization(const Operator &op,
     }
 )",
                               attrName, getterName, *defaultValue, version);
+        } else if (sameOperandRank.has_value()) {
+          // Implicit default is all-`false` (the value the reader fixup
+          // resynthesizes for legacy bytecode), so downgrade is lossless
+          // iff the runtime value is itself all-`false`. Otherwise error.
+          os << llvm::formatv(R"(
+    auto nativeAttrValue_{1} = op.{2}();
+    if (::llvm::is_contained(nativeAttrValue_{1}, true)) {{
+      op.emitError() << "operation requires bytecode version {0}+ because it carries a non-default '{1}' attribute (the legacy reader can only reconstruct an all-`false` vector), but targeting " << config.bytecodeVersion.toString();
+      return failure();
+    }
+)",
+                              version, attrName, getterName);
         } else {
           // No default value available.
           std::string opVersion = extractVersionFromOperation(op);
@@ -721,25 +734,6 @@ static void generateDispatchSwitch(const RecordKeeper &records,
         "---===//\n";
 }
 
-/// The main entry point for the TableGen backend.
-static bool generateBytecode(const RecordKeeper &records, raw_ostream &os) {
-  os << "//===-- Begin Writer Implementations --===//\n";
-  os << "#ifdef GEN_OP_WRITERS\n\n";
-  generateOpWriterImplementations(records, os);
-  os << "#undef GEN_OP_WRITERS\n";
-  os << "#endif // GEN_OP_WRITERS\n";
-  os << "//===-- End Writer Implementations --===//\n\n";
-
-  os << "//===-- Begin Dispatch Switch --===//\n";
-  os << "#ifdef GEN_OP_WRITER_DISPATCH\n\n";
-  generateDispatchSwitch(records, os);
-  os << "#undef GEN_OP_WRITER_DISPATCH\n";
-  os << "#endif // GEN_OP_WRITER_DISPATCH\n";
-  os << "//===-- End Dispatch Switch --===//\n\n";
-
-  return false;
-}
-
 /// Generate version constants based on actual opcode assignments
 static void generateVersionConstants(const RecordKeeper &records,
                                      raw_ostream &os) {
@@ -901,6 +895,285 @@ llvm::SmallVector<BytecodeVersion> mlir::cuda_tile::getSupportedVersions() {{
                       versionList);
 }
 
+//===----------------------------------------------------------------------===//
+// Per-Operation Version Checking Generation
+//===----------------------------------------------------------------------===//
+
+/// Generates a per-operation version checking function.
+/// This generates code like:
+///   static BytecodeVersion getMinVersionFor_ForOp(
+///       cuda_tile::ForOp op,
+///       function_ref<BytecodeVersion(Type)> getTypeVersion,
+///       function_ref<BytecodeVersion(Attribute)> getAttrVersion) { ... }
+static void generateOpVersionChecker(const Operator &op, raw_ostream &os) {
+  StringRef opClassName = op.getCppClassName();
+  StringRef dialectNamespace = op.getDialect().getCppNamespace();
+  std::string qualifiedClassName =
+      dialectNamespace.str() + "::" + opClassName.str();
+
+  std::string opVersion = extractVersionFromOperation(op);
+  auto [opMajor, opMinor] = parseVersion(opVersion);
+
+  os << "// Version checker for: " << op.getOperationName() << "\n";
+  os << "static mlir::cuda_tile::BytecodeVersion getMinVersionFor_"
+     << opClassName << "(\n";
+  os << "    " << qualifiedClassName << " op,\n";
+  os << "    llvm::function_ref<mlir::cuda_tile::BytecodeVersion(mlir::Type)> "
+        "getTypeVersion,\n";
+  os << "    "
+        "llvm::function_ref<mlir::cuda_tile::BytecodeVersion(mlir::Attribute)> "
+        "getAttrVersion) {\n";
+
+  // Start with the operation's base version.
+  os << "  mlir::cuda_tile::BytecodeVersion maxVersion = "
+        "*mlir::cuda_tile::BytecodeVersion::fromVersion("
+     << opMajor << ", " << opMinor << ", 0);\n";
+  os << "  [[maybe_unused]] auto updateMax = "
+        "[&](mlir::cuda_tile::BytecodeVersion v) "
+        "{ maxVersion = std::max(maxVersion, v); };\n\n";
+
+  // Check all operands: version bump if added after op, plus type check.
+  if (op.getNumOperands() > 0) {
+    os << "  // Check operands.\n";
+    for (unsigned i = 0; i < static_cast<unsigned>(op.getNumOperands()); ++i) {
+      auto [operandMajor, operandMinor] = extractVersionFromOperand(i, op);
+      bool isVersioned =
+          isVersionGreater(operandMajor, operandMinor, opMajor, opMinor);
+
+      const auto &operand = op.getOperand(i);
+      std::string getterName = op.getGetterName(operand.name);
+
+      if (operand.isOptional()) {
+        // Optional operand: check if present, bump version if versioned, check
+        // type.
+        os << "  if (auto operand = op." << getterName << "()) {\n";
+        if (isVersioned) {
+          os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+             << operandMajor << ", " << operandMinor << ", 0));\n";
+        }
+        os << "    updateMax(getTypeVersion(operand.getType()));\n";
+        os << "  }\n";
+      } else if (operand.isVariadic()) {
+        // Variadic operand: bump version if versioned and non-empty, check all
+        // types.
+        if (isVersioned) {
+          os << "  if (!op." << getterName << "().empty())\n";
+          os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+             << operandMajor << ", " << operandMinor << ", 0));\n";
+        }
+        os << "  for (auto operand : op." << getterName << "())\n";
+        os << "    updateMax(getTypeVersion(operand.getType()));\n";
+      } else {
+        // Required operand: bump version if versioned, always check type.
+        if (isVersioned) {
+          os << "  updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+             << operandMajor << ", " << operandMinor << ", 0));\n";
+        }
+        os << "  updateMax(getTypeVersion(op." << getterName
+           << "().getType()));\n";
+      }
+    }
+  }
+
+  // Check all results: version bump if added after op (and used), check type.
+  if (op.getNumResults() > 0) {
+    os << "\n  // Check results.\n";
+    for (unsigned i = 0; i < static_cast<unsigned>(op.getNumResults()); ++i) {
+      auto [resultMajor, resultMinor] = extractVersionFromResult(i, op);
+      bool isVersioned =
+          isVersionGreater(resultMajor, resultMinor, opMajor, opMinor);
+
+      const auto &result = op.getResult(i);
+      std::string getterName = op.getGetterName(result.name);
+
+      if (result.isVariadic()) {
+        // Variadic result: bump version if versioned and non-empty, check all
+        // types.
+        if (isVersioned) {
+          os << "  if (!op." << getterName << "().empty())\n";
+          os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+             << resultMajor << ", " << resultMinor << ", 0));\n";
+        }
+        os << "  for (auto result : op." << getterName << "())\n";
+        os << "    updateMax(getTypeVersion(result.getType()));\n";
+      } else if (isVersioned) {
+        // Versioned non-variadic result: only bump and check type if used.
+        os << "  if (!op." << getterName << "().use_empty()) {\n";
+        os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+           << resultMajor << ", " << resultMinor << ", 0));\n";
+        os << "    updateMax(getTypeVersion(op." << getterName
+           << "().getType()));\n";
+        os << "  }\n";
+      } else {
+        // Base version non-variadic result: always check type.
+        os << "  updateMax(getTypeVersion(op." << getterName
+           << "().getType()));\n";
+      }
+    }
+  }
+
+  // Check all attributes: version bump if added after op, check attr version.
+  // Track if we've emitted any attr checks (for section comment).
+  bool hasAttrChecks = false;
+  for (const auto &namedAttr : op.getAttributes()) {
+    bool isUnitAttr =
+        StringRef(namedAttr.attr.getStorageType()).contains("UnitAttr");
+
+    auto [attrMajor, attrMinor] = extractVersionFromAttribute(namedAttr, op);
+    bool isVersioned = isVersionGreater(attrMajor, attrMinor, opMajor, opMinor);
+
+    // Base version UnitAttr: skip (no enum value, no version bump needed).
+    if (isUnitAttr && !isVersioned) {
+      continue;
+    }
+
+    // Emit section comment once, only if we have attr checks to emit.
+    if (!hasAttrChecks) {
+      os << "\n  // Check attributes.\n";
+      hasAttrChecks = true;
+    }
+
+    std::string getterName = op.getGetterName(namedAttr.name);
+
+    if (isUnitAttr) {
+      // Versioned UnitAttr: presence indicates newer version required.
+      os << "  if (op." << getterName << "())\n";
+      os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+         << attrMajor << ", " << attrMinor << ", 0));\n";
+    } else if (namedAttr.attr.isOptional()) {
+      // Optional attr: check if present, bump version if versioned, check attr
+      // version.
+      os << "  if (auto attr = op." << getterName << "Attr()) {\n";
+      if (isVersioned) {
+        os << "    updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+           << attrMajor << ", " << attrMinor << ", 0));\n";
+      }
+      os << "    updateMax(getAttrVersion(attr));\n";
+      os << "  }\n";
+    } else {
+      // Required attr: bump version if versioned, always check attr version.
+      if (isVersioned) {
+        os << "  updateMax(*mlir::cuda_tile::BytecodeVersion::fromVersion("
+           << attrMajor << ", " << attrMinor << ", 0));\n";
+      }
+      os << "  updateMax(getAttrVersion(op." << getterName << "Attr()));\n";
+    }
+  }
+
+  // Check block argument types in regions.
+  if (op.getNumRegions() > 0) {
+    os << "\n  // Check block argument types.\n";
+    os << "  for (auto &region : op->getRegions())\n";
+    os << "    for (auto &block : region)\n";
+    os << "      for (auto arg : block.getArguments())\n";
+    os << "        updateMax(getTypeVersion(arg.getType()));\n";
+  }
+
+  os << "  return maxVersion;\n";
+  os << "}\n\n";
+}
+
+/// Generates implementations of all per-operation version checking functions.
+static void generateOpVersionCheckerImplementations(const RecordKeeper &records,
+                                                    raw_ostream &os) {
+  emitSourceFileHeader("Generated Operation Version Checkers", os);
+  auto opDefs = records.getAllDerivedDefinitions("Op");
+
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+  os << "// Per-Operation Version Checking Functions\n";
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n\n";
+
+  for (const Record *opDef : opDefs) {
+    Operator op(opDef);
+    generateOpVersionChecker(op, os);
+  }
+
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+  os << "// End of generated version checking functions.\n";
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+}
+
+/// Generates the TypeSwitch dispatch for per-operation version checking.
+static void generateVersionCheckDispatch(const RecordKeeper &records,
+                                         raw_ostream &os) {
+  emitSourceFileHeader("Generated Version Check Dispatch", os);
+  auto opDefs = records.getAllDerivedDefinitions("Op");
+
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+  os << "// Version Check Dispatch\n";
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n\n";
+
+  os << "BytecodeVersion opVersion = "
+        "llvm::TypeSwitch<Operation *, BytecodeVersion>(op)\n";
+  for (const Record *opDef : opDefs) {
+    Operator op(opDef);
+    StringRef opClassName = op.getCppClassName();
+    StringRef dialectNamespace = op.getDialect().getCppNamespace();
+    std::string qualifiedClassName =
+        dialectNamespace.str() + "::" + opClassName.str();
+    os << "    .Case<" << qualifiedClassName << ">([&](auto concreteOp) {\n"
+       << "      return getMinVersionFor_" << opClassName
+       << "(concreteOp, getTypeVersion, getAttrVersion);\n"
+       << "    })\n";
+  }
+  os << "    .Default([&](mlir::Operation *) {\n"
+     << "      return mlir::cuda_tile::BytecodeVersion::kMinSupportedVersion;\n"
+     << "    });\n\n";
+
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+  os << "// End of generated dispatch.\n";
+  os << "//"
+        "===-------------------------------------------------------------------"
+        "---===//\n";
+}
+
+/// The main entry point for the TableGen backend.
+static bool generateBytecode(const RecordKeeper &records, raw_ostream &os) {
+  os << "//===-- Begin Writer Implementations --===//\n";
+  os << "#ifdef GEN_OP_WRITERS\n\n";
+  generateOpWriterImplementations(records, os);
+  os << "#undef GEN_OP_WRITERS\n";
+  os << "#endif // GEN_OP_WRITERS\n";
+  os << "//===-- End Writer Implementations --===//\n\n";
+
+  os << "//===-- Begin Dispatch Switch --===//\n";
+  os << "#ifdef GEN_OP_WRITER_DISPATCH\n\n";
+  generateDispatchSwitch(records, os);
+  os << "#undef GEN_OP_WRITER_DISPATCH\n";
+  os << "#endif // GEN_OP_WRITER_DISPATCH\n";
+  os << "//===-- End Dispatch Switch --===//\n\n";
+
+  os << "//===-- Begin Operation Version Checkers --===//\n";
+  os << "#ifdef GEN_OP_VERSION_CHECKERS\n\n";
+  generateOpVersionCheckerImplementations(records, os);
+  os << "#undef GEN_OP_VERSION_CHECKERS\n";
+  os << "#endif // GEN_OP_VERSION_CHECKERS\n";
+  os << "//===-- End Operation Version Checkers --===//\n\n";
+
+  os << "//===-- Begin Version Check Dispatch --===//\n";
+  os << "#ifdef GEN_OP_VERSION_CHECK_DISPATCH\n\n";
+  generateVersionCheckDispatch(records, os);
+  os << "#undef GEN_OP_VERSION_CHECK_DISPATCH\n";
+  os << "#endif // GEN_OP_VERSION_CHECK_DISPATCH\n";
+  os << "//===-- End Version Check Dispatch --===//\n";
+
+  return false;
+}
+
 /// Generate opcode definitions in single file with ifdef guards
 static bool generateOpcodes(const RecordKeeper &records, raw_ostream &os) {
   os << "//===-- Begin Opcode Enum --===//\n";
@@ -979,7 +1252,14 @@ static bool generateTypeBytecode(const RecordKeeper &records, raw_ostream &os) {
   generateDependentTypeRegistration(structure, os);
   os << "#undef GEN_DEPENDENT_TYPE_REGISTRATION\n";
   os << "#endif // GEN_DEPENDENT_TYPE_REGISTRATION\n";
-  os << "//===-- End Dependent Type Registration --===//\n";
+  os << "//===-- End Dependent Type Registration --===//\n\n";
+
+  os << "//===-- Begin Type Version Map --===//\n";
+  os << "#ifdef GEN_TYPE_VERSION_MAP\n\n";
+  generateTypeVersionMap(structure, os);
+  os << "#undef GEN_TYPE_VERSION_MAP\n";
+  os << "#endif // GEN_TYPE_VERSION_MAP\n";
+  os << "//===-- End Type Version Map --===//\n";
 
   return false;
 }
@@ -1040,7 +1320,95 @@ static bool generateAttrBytecode(const RecordKeeper &records, raw_ostream &os) {
   generateEnumValueVersionCheck(structure, os);
   os << "\n#undef GEN_ENUM_VALUE_VERSION_CHECK\n";
   os << "#endif // GEN_ENUM_VALUE_VERSION_CHECK\n";
-  os << "//===-- End Enum Value Version Check --===//\n";
+  os << "//===-- End Enum Value Version Check --===//\n\n";
+
+  // Generate attribute version map for MinVersionAnalyzer.
+  os << "//===-- Begin Attr Version Map --===//\n";
+  os << "#ifdef GEN_ATTR_VERSION_MAP\n";
+  generateAttrVersionMap(structure, os);
+  os << "\n#undef GEN_ATTR_VERSION_MAP\n";
+  os << "#endif // GEN_ATTR_VERSION_MAP\n";
+  os << "//===-- End Attr Version Map --===//\n\n";
+
+  // Generate enum value version map for MinVersionAnalyzer.
+  os << "//===-- Begin Enum Value Version Map --===//\n";
+  os << "#ifdef GEN_ENUM_VALUE_VERSION_MAP\n";
+  generateEnumValueVersionMap(structure, os);
+  os << "\n#undef GEN_ENUM_VALUE_VERSION_MAP\n";
+  os << "#endif // GEN_ENUM_VALUE_VERSION_MAP\n";
+  os << "//===-- End Enum Value Version Map --===//\n\n";
+
+  // Generate attribute parameter version map for MinVersionAnalyzer.
+  os << "//===-- Begin Attr Param Version Map --===//\n";
+  os << "#ifdef GEN_ATTR_PARAM_VERSION_MAP\n";
+  generateAttrParamVersionMap(structure, os);
+  os << "\n#undef GEN_ATTR_PARAM_VERSION_MAP\n";
+  os << "#endif // GEN_ATTR_PARAM_VERSION_MAP\n";
+  os << "//===-- End Attr Param Version Map --===//\n\n";
+
+  // Generate attribute serializers.
+  os << "//===-- Begin Attr Writer Implementations --===//\n";
+  os << "#ifdef GEN_ATTR_WRITERS\n\n";
+  generateAttrSerializers(structure, os);
+  os << "#undef GEN_ATTR_WRITERS\n";
+  os << "#endif // GEN_ATTR_WRITERS\n";
+  os << "//===-- End Attr Writer Implementations --===//\n\n";
+
+  // Generate is_cuda_tile_serializable_attr type trait for BytecodeReader.
+  os << "//===-- Begin Serializable Attr Type Trait --===//\n";
+  os << "#ifdef GEN_SERIALIZABLE_ATTR_TYPE_TRAIT\n";
+  generateSerializableAttrTypeTrait(structure, os);
+  os << "\n#undef GEN_SERIALIZABLE_ATTR_TYPE_TRAIT\n";
+  os << "#endif // GEN_SERIALIZABLE_ATTR_TYPE_TRAIT\n";
+  os << "//===-- End Serializable Attr Type Trait --===//\n\n";
+
+  // Generate attribute deserializers.
+  os << "//===-- Begin Attr Reader Implementations --===//\n";
+  os << "#ifdef GEN_ATTR_READERS\n\n";
+  generateAttrDeserializers(structure, os);
+  os << "#undef GEN_ATTR_READERS\n";
+  os << "#endif // GEN_ATTR_READERS\n";
+  os << "//===-- End Attr Reader Implementations --===//\n\n";
+
+  // Generate parseCudaTileAttrInline<T> specializations for BytecodeReader.
+  os << "//===-- Begin Attr Inline Reader Dispatch --===//\n";
+  os << "#ifdef GEN_ATTR_INLINE_READER_DISPATCH\n\n";
+  generateAttrInlineReaderDispatch(structure, os);
+  os << "#undef GEN_ATTR_INLINE_READER_DISPATCH\n";
+  os << "#endif // GEN_ATTR_INLINE_READER_DISPATCH\n";
+  os << "//===-- End Attr Inline Reader Dispatch --===//\n\n";
+
+  // Generate attribute serializer dispatch.
+  os << "//===-- Begin Attr Writer Dispatch --===//\n";
+  os << "#ifdef GEN_ATTR_WRITER_DISPATCH\n\n";
+  generateAttrSerializerDispatch(structure, os);
+  os << "#undef GEN_ATTR_WRITER_DISPATCH\n";
+  os << "#endif // GEN_ATTR_WRITER_DISPATCH\n";
+  os << "//===-- End Attr Writer Dispatch --===//\n\n";
+
+  // Generate attribute deserializer dispatch.
+  os << "//===-- Begin Attr Reader Dispatch --===//\n";
+  os << "#ifdef GEN_ATTR_READER_DISPATCH\n\n";
+  generateAttrDeserializerDispatch(structure, os);
+  os << "#undef GEN_ATTR_READER_DISPATCH\n";
+  os << "#endif // GEN_ATTR_READER_DISPATCH\n";
+  os << "//===-- End Attr Reader Dispatch --===//\n\n";
+
+  // Generate case labels for the reader's self-contained attribute switch.
+  os << "//===-- Begin Attr Reader Switch Cases --===//\n";
+  os << "#ifdef GEN_ATTR_READER_SWITCH_CASES\n\n";
+  generateAttrReaderSwitchCases(structure, os);
+  os << "\n#undef GEN_ATTR_READER_SWITCH_CASES\n";
+  os << "#endif // GEN_ATTR_READER_SWITCH_CASES\n";
+  os << "//===-- End Attr Reader Switch Cases --===//\n";
+
+  // Generate dependent type registration for CudaTile attributes.
+  os << "//===-- Begin Dependent Attr Type Registration --===//\n";
+  os << "#ifdef GEN_DEPENDENT_ATTR_TYPE_REGISTRATION\n\n";
+  generateDependentAttrTypeRegistration(structure, os);
+  os << "#undef GEN_DEPENDENT_ATTR_TYPE_REGISTRATION\n";
+  os << "#endif // GEN_DEPENDENT_ATTR_TYPE_REGISTRATION\n";
+  os << "//===-- End Dependent Attr Type Registration --===//\n\n";
 
   return false;
 }

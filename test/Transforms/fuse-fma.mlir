@@ -453,3 +453,102 @@ cuda_tile.module @test {
     return %5 : !cuda_tile.tile<f32>
   }
 }
+
+// -----
+
+// addf with no mulf operands (should not fuse)
+// CHECK-LABEL: testing$func @test_no_fusion_addf_no_mulf
+// CHECK: addf
+// CHECK-NOT: fma
+
+cuda_tile.module @test {
+  cuda_tile.testing$func @test_no_fusion_addf_no_mulf() -> !cuda_tile.tile<f32> {
+    %0 = constant <f32: 2.0> : !cuda_tile.tile<f32>
+    %1 = constant <f32: 3.0> : !cuda_tile.tile<f32>
+    
+    %2 = cuda_tile.addf %0, %1 rounding<nearest_even> : !cuda_tile.tile<f32>
+    
+    return %2 : !cuda_tile.tile<f32>
+  }
+}
+
+// -----
+
+// subf with no mulf on LHS (should not fuse)
+// CHECK-LABEL: testing$func @test_no_fusion_subf_no_mulf
+// CHECK: subf
+// CHECK-NOT: fma
+
+cuda_tile.module @test {
+  cuda_tile.testing$func @test_no_fusion_subf_no_mulf() -> !cuda_tile.tile<f32> {
+    %0 = constant <f32: 2.0> : !cuda_tile.tile<f32>
+    %1 = constant <f32: 3.0> : !cuda_tile.tile<f32>
+    
+    %2 = cuda_tile.subf %0, %1 rounding<nearest_even> : !cuda_tile.tile<f32>
+    
+    return %2 : !cuda_tile.tile<f32>
+  }
+}
+
+// -----
+
+// subf with different rounding modes (should not fuse)
+// CHECK-LABEL: testing$func @test_sub_different_rounding
+// CHECK: mulf
+// CHECK: subf
+// CHECK-NOT: fma
+
+cuda_tile.module @test {
+  cuda_tile.testing$func @test_sub_different_rounding() -> !cuda_tile.tile<f32> {
+    %0 = constant <f32: 2.0> : !cuda_tile.tile<f32>
+    %1 = constant <f32: 3.0> : !cuda_tile.tile<f32>
+    %2 = constant <f32: 4.0> : !cuda_tile.tile<f32>
+    
+    %3 = cuda_tile.mulf %0, %1 rounding<nearest_even> : !cuda_tile.tile<f32>
+    %4 = cuda_tile.subf %3, %2 rounding<zero> : !cuda_tile.tile<f32>
+    
+    return %4 : !cuda_tile.tile<f32>
+  }
+}
+
+// -----
+
+// subf with different flush-to-zero settings (should not fuse)
+// CHECK-LABEL: testing$func @test_sub_different_ftz
+// CHECK: mulf
+// CHECK: subf
+// CHECK-NOT: fma
+
+cuda_tile.module @test {
+  cuda_tile.testing$func @test_sub_different_ftz() -> !cuda_tile.tile<f32> {
+    %0 = constant <f32: 2.0> : !cuda_tile.tile<f32>
+    %1 = constant <f32: 3.0> : !cuda_tile.tile<f32>
+    %2 = constant <f32: 4.0> : !cuda_tile.tile<f32>
+    
+    %3 = cuda_tile.mulf %0, %1 rounding<nearest_even> flush_to_zero : !cuda_tile.tile<f32>
+    %4 = cuda_tile.subf %3, %2 rounding<nearest_even> : !cuda_tile.tile<f32>
+    
+    return %4 : !cuda_tile.tile<f32>
+  }
+}
+
+// -----
+
+// subf with flush-to-zero enabled on both sides (should fuse)
+// CHECK-LABEL: testing$func @test_sub_ftz_enabled
+// CHECK: %[[RESULT:.+]] = fma %{{.+}}, %{{.+}}, %{{.+}} flush_to_zero : tile<f32>
+// CHECK-NOT: mulf
+// CHECK-NOT: subf
+
+cuda_tile.module @test {
+  cuda_tile.testing$func @test_sub_ftz_enabled() -> !cuda_tile.tile<f32> {
+    %0 = constant <f32: 2.0> : !cuda_tile.tile<f32>
+    %1 = constant <f32: 3.0> : !cuda_tile.tile<f32>
+    %2 = constant <f32: 4.0> : !cuda_tile.tile<f32>
+    
+    %3 = cuda_tile.mulf %0, %1 rounding<nearest_even> flush_to_zero : !cuda_tile.tile<f32>
+    %4 = cuda_tile.subf %3, %2 rounding<nearest_even> flush_to_zero : !cuda_tile.tile<f32>
+    
+    return %4 : !cuda_tile.tile<f32>
+  }
+}

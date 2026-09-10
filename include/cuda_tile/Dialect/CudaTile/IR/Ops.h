@@ -99,7 +99,8 @@ struct IfOpImplicitTerminatorType
     : public ControlFlowImplicitTerminatorOpType<YieldOp, BreakOp, ContinueOp,
                                                  ReturnOp> {};
 struct LoopOpImplicitTerminatorType
-    : public ControlFlowImplicitTerminatorOpType<ContinueOp, BreakOp> {};
+    : public ControlFlowImplicitTerminatorOpType<ContinueOp, BreakOp,
+                                                 ReturnOp> {};
 } // namespace impl
 } // namespace mlir::cuda_tile
 

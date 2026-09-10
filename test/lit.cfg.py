@@ -10,9 +10,9 @@ from lit.llvm import llvm_config
 # name: The name of this test suite
 config.name = "CUDA_TILE"
 
-# Use lit's internal shell. external-shell execution (execute_external=True)
+# Use lit's shell. external-shell execution (execute_external=True)
 # was deprecated in LLVM-23 and ShTest now rejects it; all CUDA Tile tests
-# use standard lit constructs that the internal shell supports.
+# use standard lit constructs that the lit's shell supports.
 config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
@@ -54,6 +54,7 @@ else:
 
 tools = [
     "cuda-tile-opt",
+    "cuda-tile-optimize",
     "FileCheck",
     "not",
 ]
@@ -82,6 +83,20 @@ if config.llvm_use_sanitizer and "linux" in config.host_os.lower():
     ]
     preload_path = f'LD_PRELOAD="{" ".join(preload_libs)}"'
     quoted_python_executable = f"{preload_path} {quoted_python_executable}"
+
+    # Workaround: Suppress alloc-dealloc-mismatch (operator new vs free) in
+    # libnanobind-mlir.so, a known nanobind <2.9 bug.
+    # Append to any existing ASAN_OPTIONS so non conflicting CI-set options are preserved.
+    asan_opts = (
+        "detect_leaks=0:protect_shadow_gap=0:replace_intrin=0"
+        ":detect_stack_use_after_return=0:alloc_dealloc_mismatch=0"
+    )
+    existing_asan = os.environ.get("ASAN_OPTIONS", "")
+    if existing_asan:
+        asan_opts = f"{existing_asan}:{asan_opts}"
+    quoted_python_executable = (
+        f"env ASAN_OPTIONS='{asan_opts}' {quoted_python_executable}"
+    )
 
 config.substitutions.append(("%PYTHON", quoted_python_executable))
 

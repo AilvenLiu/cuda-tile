@@ -4,7 +4,8 @@ include(AddMLIRPython)
 # shared library of sanitizers
 # Read more at https://github.com/google/sanitizers/issues/1086
 if(CUDA_TILE_ENABLE_SANITIZER AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  add_compile_options("-shared-libasan")
+  list(APPEND MLIR_BINDINGS_PYTHON_EXTRA_NANOBIND_COMPILE_OPTIONS "-shared-libasan")
+  list(APPEND MLIR_BINDINGS_PYTHON_EXTRA_EXTENSION_COMPILE_OPTIONS "-shared-libasan")
 endif()
 
 # Specifies that all MLIR packages are co-located under the `cuda_tile`
@@ -37,7 +38,6 @@ declare_mlir_python_extension(CudaTilePythonSources.SiteInitializer
   # bindings. Name is unchanged in order to minimize the disruption to cuTile and other users.
   MODULE_NAME   _site_initialize_1
   ADD_TO_PARENT CudaTilePythonSources
-  PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
     SiteInitializer.cpp
   EMBED_CAPI_LINK_LIBS
@@ -63,7 +63,6 @@ declare_mlir_python_extension(CudaTilePythonSources.Dialects.cuda_tile.Nanobind
   MODULE_NAME _cuda_tile
   ADD_TO_PARENT CudaTilePythonSources.Dialects.cuda_tile
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
-  PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
     Dialect/DialectCudaTile.cpp
   PRIVATE_LINK_LIBS
@@ -103,6 +102,10 @@ add_mlir_python_common_capi_library(CudaTilePythonCAPI
 ## to the parent directory of the shared library. We map them to this path so that they are in the same directory
 ## as the shared library and thus found by the dynamic loader.
 add_mlir_python_modules(CudaTilePythonModules
+  MLIR_BINDINGS_PYTHON_EXTRA_NANOBIND_COMPILE_OPTIONS ${MLIR_BINDINGS_PYTHON_EXTRA_NANOBIND_COMPILE_OPTIONS}
+  MLIR_BINDINGS_PYTHON_EXTRA_NANOBIND_LINK_LIBS ${MLIR_BINDINGS_PYTHON_EXTRA_NANOBIND_LINK_LIBS}
+  MLIR_BINDINGS_PYTHON_EXTRA_EXTENSION_COMPILE_OPTIONS ${MLIR_BINDINGS_PYTHON_EXTRA_EXTENSION_COMPILE_OPTIONS}
+  MLIR_BINDINGS_PYTHON_EXTRA_EXTENSION_LINK_LIBS ${MLIR_BINDINGS_PYTHON_EXTRA_EXTENSION_LINK_LIBS}
   ROOT_PREFIX    "${CUDA_TILE_BINARY_DIR}/python_packages/cuda_tile/_mlir"
   INSTALL_PREFIX "python_packages/cuda_tile/_mlir"
   DECLARED_SOURCES

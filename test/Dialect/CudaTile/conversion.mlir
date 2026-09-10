@@ -213,6 +213,17 @@ cuda_tile.module @kernels {
     %ftof_f32_f64_t = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xf64>
     // CHECK: ftof %[[c_tensor_f32]] : tile<2x2xf32> -> tile<2x2xf4E2M1FN>
     %ftof_f32_f4e2m1fn = ftof %c_tensor_f32 : tile<2x2xf32> -> tile<2x2xf4E2M1FN>
+    // CHECK: ftof %[[c5_f32]] rounding<nearest_away> : tile<f32> -> tile<tf32>
+    %ftof_f32_tf32_rna = ftof %c5_f32 rounding<nearest_away> : tile<f32> -> tile<tf32>
+    // CHECK: ftof %[[c5_f32]] rounding<zero> : tile<f32> -> tile<tf32>
+    %ftof_f32_tf32_rz = ftof %c5_f32 rounding<zero> : tile<f32> -> tile<tf32>
+    // CHECK: ftof %[[c5_f32]] rounding<zero> : tile<f32> -> tile<bf16>
+    %ftof_f32_bf16_rz = ftof %c5_f32 rounding<zero> : tile<f32> -> tile<bf16>
+    // CHECK: ftof %[[c5_f32]] rounding<zero> : tile<f32> -> tile<f16>
+    %ftof_f32_f16_rz = ftof %c5_f32 rounding<zero> : tile<f32> -> tile<f16>
+    // Widening with non-default rounding mode
+    // CHECK: ftof %[[c5_f32]] rounding<nearest_away> : tile<f32> -> tile<f64>
+    %ftof_f32_f64_rna = ftof %c5_f32 rounding<nearest_away> : tile<f32> -> tile<f64>
 
     // **** f64 input ****
     // CHECK: ftof %[[c5_f64]] : tile<f64> -> tile<f16>
@@ -225,6 +236,26 @@ cuda_tile.module @kernels {
     %ftof_f64_f32_t = ftof %c_tensor_f64 : tile<2x2xf64> -> tile<2x2xf32>
     // CHECK: ftof %[[c_tensor_f64]] : tile<2x2xf64> -> tile<2x2xf4E2M1FN>
     %ftof_f64_f4e2m1fn = ftof %c_tensor_f64 : tile<2x2xf64> -> tile<2x2xf4E2M1FN>
+    // CHECK: ftof %[[c5_f64]] rounding<negative_inf> : tile<f64> -> tile<f32>
+    %ftof_f64_f32_rm = ftof %c5_f64 rounding<negative_inf> : tile<f64> -> tile<f32>
+    // CHECK: ftof %[[c5_f64]] rounding<positive_inf> : tile<f64> -> tile<f32>
+    %ftof_f64_f32_rp = ftof %c5_f64 rounding<positive_inf> : tile<f64> -> tile<f32>
+    // CHECK: ftof %[[c5_f64]] rounding<zero> : tile<f64> -> tile<f32>
+    %ftof_f64_f32_rz = ftof %c5_f64 rounding<zero> : tile<f64> -> tile<f32>
+    // CHECK: ftof %[[c5_f64]] rounding<zero> : tile<f64> -> tile<f16>
+    %ftof_f64_f16_rz = ftof %c5_f64 rounding<zero> : tile<f64> -> tile<f16>
+    // CHECK: ftof %[[c5_f64]] rounding<zero> : tile<f64> -> tile<bf16>
+    %ftof_f64_bf16_rz = ftof %c5_f64 rounding<zero> : tile<f64> -> tile<bf16>
+
+    // **** widening with non-default rounding ****
+    // CHECK: ftof %[[c5_f16]] rounding<zero> : tile<f16> -> tile<f32>
+    %ftof_f16_f32_rz = ftof %c5_f16 rounding<zero> : tile<f16> -> tile<f32>
+    // CHECK: ftof %[[c5_f16]] rounding<negative_inf> : tile<f16> -> tile<f32>
+    %ftof_f16_f32_rm = ftof %c5_f16 rounding<negative_inf> : tile<f16> -> tile<f32>
+    // CHECK: ftof %[[c5_f16]] rounding<positive_inf> : tile<f16> -> tile<f64>
+    %ftof_f16_f64_rp = ftof %c5_f16 rounding<positive_inf> : tile<f16> -> tile<f64>
+    // CHECK: ftof %[[c_f4e2m1fn_tensor]] rounding<zero> : tile<2xf4E2M1FN> -> tile<2xf16>
+    %ftof_f4_f16_rz = ftof %c_f4e2m1fn_tensor rounding<zero> : tile<2xf4E2M1FN> -> tile<2xf16>
   }
 
   cuda_tile.entry @ftoi() {
@@ -347,6 +378,14 @@ cuda_tile.module @kernels {
     %ftoi_f64_i64_s = ftoi %c5_f64 signed : tile<f64> -> tile<i64>
     // CHECK: ftoi %[[c5_f64]] unsigned : tile<f64> -> tile<i64>
     %ftoi_f64_i64_u = ftoi %c5_f64 unsigned : tile<f64> -> tile<i64>
+
+    // **** saturating modifier ****
+    // CHECK: ftoi %[[c_tensor_f32]] signed saturating : tile<2x2xf32> -> tile<2x2xi32>
+    %ftoi_f32_i32_s_sat = ftoi %c_tensor_f32 signed saturating : tile<2x2xf32> -> tile<2x2xi32>
+    // CHECK: ftoi %[[c_tensor_f32]] unsigned saturating : tile<2x2xf32> -> tile<2x2xi32>
+    %ftoi_f32_i32_u_sat = ftoi %c_tensor_f32 unsigned saturating : tile<2x2xf32> -> tile<2x2xi32>
+    // CHECK: ftoi %[[c5_f64]] signed saturating : tile<f64> -> tile<i64>
+    %ftoi_f64_i64_s_sat = ftoi %c5_f64 signed saturating : tile<f64> -> tile<i64>
   }
 
   cuda_tile.entry @itof() {

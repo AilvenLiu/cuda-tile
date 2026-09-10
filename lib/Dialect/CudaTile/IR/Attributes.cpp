@@ -23,7 +23,10 @@
 
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Remark.h"
 #include <optional>
+#include <string>
+#include <type_traits>
 
 using namespace mlir;
 using namespace mlir::cuda_tile;
@@ -60,141 +63,101 @@ emitDiagnostic(Location loc, StringRef msg = StringRef(),
                                                : emitWarning(loc, msg);
 }
 
-/// Validate num_cta_in_cga parameter and return the value if valid.
-/// Returns nullopt with error message if invalid (when key is provided).
-/// Pass empty key from getters to skip error message construction.
-static ValidationResult<uint64_t> validateNumCTAInCGA(Attribute attr,
-                                                      StringRef context) {
-  auto intAttr = dyn_cast_or_null<IntegerAttr>(attr);
-  if (!intAttr) {
-    return {std::nullopt, ("integer value expected for " + context + "." +
-                           OptimizationHintsAttr::kNumCTAInCGA)
-                              .str()};
-  }
-  // Ampere/ada don't support multiple CTAs in a CGA.
-  static const SmallVector<StringLiteral, 5> restrictedArchs = {
-      "sm_80", "sm_86", "sm_87", "sm_88", "sm_89"};
-  bool requiresSingleCTA = any_of(restrictedArchs, [&](StringRef arch) {
-    return context.starts_with(arch);
-  });
-  uint64_t numCTA = intAttr.getInt();
-  if (requiresSingleCTA && numCTA != 1) {
-    return {std::nullopt, ("expected 1 for " + context + "." +
-                           OptimizationHintsAttr::kNumCTAInCGA)
-                              .str()};
-  }
-  // Must be power of 2, non-zero, and <= 16
-  if ((numCTA == 0) || (numCTA > 16) || ((numCTA & (numCTA - 1)) != 0)) {
-    return {std::nullopt, ("expected power-of-two ≤ 16 for " + context + "." +
-                           OptimizationHintsAttr::kNumCTAInCGA)
-                              .str()};
-  }
-  return {numCTA, ""};
-}
+// Validators are auto-generated from HintKey enum metadata in AttrDefs.td.
+#define CUDA_TILE_HINT_VALIDATORS
+#include "cuda_tile/Dialect/CudaTile/IR/HintKeyImpl.inc"
+#undef CUDA_TILE_HINT_VALIDATORS
 
-static ValidationResult<uint64_t>
-validateNumWorkerWarpsPerCTA(Attribute attr, StringRef context) {
-  auto intAttr = dyn_cast_or_null<IntegerAttr>(attr);
-  if (!intAttr) {
-    return {std::nullopt, ("integer value expected for " + context + "." +
-                           OptimizationHintsAttr::kNumWorkerWarpsPerCTA)
-                              .str()};
-  }
-  int numWarps = intAttr.getInt();
-  // Must be power of 2, non-zero, and <= 32
-  if ((numWarps == 0) || (numWarps > 32) || ((numWarps & (numWarps - 1)) != 0)) {
-    return {std::nullopt, ("expected power-of-two ≤ 32 for " + context + "." +
-                           OptimizationHintsAttr::kNumWorkerWarpsPerCTA)
-                              .str()};
-  }
-  // TODO: Currently only support 4 or 8 warps for no functionality check.
-  if (numWarps != 4 && numWarps != 8) {
-    numWarps = std::clamp(numWarps, 4, 8);
-  }
-  return {numWarps, ""};
-}
-
-/// Validate allow_tma parameter and return the value if valid.
-/// Returns nullopt with error message if invalid (when key is provided).
-/// Pass empty key from getters to skip error message construction.
-static ValidationResult<bool> validateAllowTMA(Attribute attr,
-                                               StringRef context) {
-  auto boolAttr = dyn_cast_or_null<BoolAttr>(attr);
-  if (!boolAttr) {
-    return {std::nullopt, ("boolean value expected for " + context + "." +
-                           OptimizationHintsAttr::kAllowTMA)
-                              .str()};
-  }
-  return {boolAttr.getValue(), ""};
-}
-
-/// Validate latency parameter and return the value if valid.
-/// Returns nullopt with error message if invalid (when key is provided).
-/// Pass empty key from getters to skip error message construction.
-static ValidationResult<int64_t> validateLatency(Attribute attr,
-                                                 StringRef context) {
-  auto intAttr = dyn_cast_or_null<IntegerAttr>(attr);
-  if (!intAttr) {
-    return {std::nullopt, ("integer value expected for " + context + "." +
-                           OptimizationHintsAttr::kLatency)
-                              .str()};
-  }
-
-  int64_t val = intAttr.getInt();
-  // Must be in range [1, 10]
-  if ((val < 1) || (val > 10)) {
-    return {std::nullopt,
-            ("integer value in the range [1, 10] is expected for " + context +
-             "." + OptimizationHintsAttr::kLatency)
-                .str()};
-  }
-
-  return {val, ""};
-}
-
-/// Validate occupancy parameter and return the value if valid.
-/// Returns nullopt with error message if invalid (when key is provided).
-/// Pass empty key from getters to skip error message construction.
-static ValidationResult<int64_t> validateOccupancy(Attribute attr,
-                                                   StringRef context) {
-  auto intAttr = dyn_cast_or_null<IntegerAttr>(attr);
-  if (!intAttr) {
-    return {std::nullopt, ("integer value expected for " + context + "." +
-                           OptimizationHintsAttr::kOccupancy)
-                              .str()};
-  }
-
-  int64_t val = intAttr.getInt();
-  // Must be in range [1, 32]
-  if ((val < 1) || (val > 32)) {
-    return {std::nullopt,
-            ("integer value in the range [1, 32] is expected for " + context +
-             "." + OptimizationHintsAttr::kOccupancy)
-                .str()};
-  }
-
-  return {val, ""};
-}
-
-/// Helper function to retrieve an attribute from SM-specific or default entry.
-/// Returns the attribute if found, otherwise std::nullopt.
-std::optional<Attribute>
-OptimizationHintsAttr::getAttributeForSmOrDefault(DictionaryAttr value,
-                                                  StringRef sm, StringRef key) {
-  if (value.empty())
+/// Retrieve and validate a hint value from the optimization_hints dictionary.
+///
+/// Looks up the hint in the SM-specific entry first (e.g. "sm_100"), falling
+/// back to "default". Validates the attribute using the provided validator and
+/// casts the result to the requested return type. When \p op is non-null,
+/// emits remarks for "used default" (value came from default entry) or
+/// "clamped" (validator returned a value but with a non-empty error message).
+///
+/// \tparam RetT        The desired return type (e.g., int, bool, std::string).
+/// \tparam ValidateRetT The type returned by the validator (typically int64_t).
+/// \param value    The optimization_hints DictionaryAttr.
+/// \param sm       Target SM string (e.g. "sm_100").
+/// \param key      The HintKey enum value to look up.
+/// \param validate Validator function for this hint type.
+/// \param op       When non-null, used to emit optimization hint remarks.
+/// \return The validated hint value, or std::nullopt if absent or invalid.
+template <typename RetT, typename ValidateRetT>
+static std::optional<RetT>
+getHintValue(DictionaryAttr value, StringRef sm, HintKey key,
+             ValidationResult<ValidateRetT> (*validate)(Attribute, StringRef),
+             Operation *op = nullptr) {
+  if (value.empty()) {
     return std::nullopt;
-
-  // Try SM-specific entry first
-  if (auto smEntry = value.getAs<DictionaryAttr>(sm))
-    if (Attribute attr = smEntry.get(key))
-      return attr;
-
-  // Fall back to default entry
-  if (auto defaultEntry = value.getAs<DictionaryAttr>(kDefault))
-    if (Attribute attr = defaultEntry.get(key))
-      return attr;
-
+  }
+  Attribute attr;
+  bool usedDefault = false;
+  if (auto smEntry = value.getAs<DictionaryAttr>(sm)) {
+    attr = smEntry.get(stringifyHintKey(key));
+  }
+  if (!attr) {
+    if (auto defEntry = value.getAs<DictionaryAttr>("default")) {
+      attr = defEntry.get(stringifyHintKey(key));
+      usedDefault = (attr != nullptr);
+    }
+  }
+  if (!attr) {
+    return std::nullopt;
+  }
+  auto result = validate(attr, sm);
+  if (op != nullptr) {
+    if (result.value) {
+      if (!result.errorMessage.empty()) {
+        cuda_tile::remark::reportRemark(
+            op, cuda_tile::remark::RemarkID::RemarkHintOutOfRange_Missed,
+            result.errorMessage);
+      } else if (usedDefault) {
+        cuda_tile::remark::reportRemark(
+            op, cuda_tile::remark::RemarkID::RemarkHintDefault_Succeeded,
+            stringifyHintKey(key));
+      } else {
+        cuda_tile::remark::reportRemark(
+            op, cuda_tile::remark::RemarkID::RemarkHint_Succeeded,
+            stringifyHintKey(key));
+      }
+      // Validators return int64_t, bool, or std::string; callers request RetT.
+      // Guard that the return type can represent all valid hint values.
+      static_assert(std::is_same_v<RetT, bool> ||
+                        std::is_same_v<RetT, std::string> ||
+                        sizeof(RetT) >= sizeof(int32_t),
+                    "RetT must be large enough to hold hint values");
+      return static_cast<RetT>(*result.value);
+    }
+    cuda_tile::remark::reportRemark(
+        op, cuda_tile::remark::RemarkID::RemarkHint_Failed,
+        stringifyHintKey(key));
+  }
   return std::nullopt;
+}
+
+/// Validate a single hint attribute using the provided validator callback.
+///
+/// Calls \p validate on \p value with \p context.  If the validator returns
+/// a non-empty errorMessage, emits a diagnostic at \p loc and sets \p res
+/// to the diagnostic result (warning or error, depending on dialect config).
+///
+/// \tparam ValidateRetT The value type produced by the validator (e.g.
+/// int64_t).
+/// \param value    The hint Attribute to validate.
+/// \param context  Validation context string (typically the architecture key).
+/// \param loc      Location used for diagnostic emission.
+/// \param res      LogicalResult reference; set to failure on validation error.
+/// \param validate Validator function returning ValidationResult<ValidateRetT>.
+template <typename ValidateRetT>
+static void verifyOneHint(
+    Attribute value, StringRef context, Location loc, LogicalResult &res,
+    ValidationResult<ValidateRetT> (*validate)(Attribute, StringRef)) {
+  auto result = validate(value, context);
+  if (!result.errorMessage.empty()) {
+    res = emitDiagnostic(loc) << result.errorMessage;
+  }
 }
 
 // Return failure() if hints are not supported for current operations/target
@@ -220,28 +183,12 @@ LogicalResult OptimizationHintsAttr::verifyParamWithContext(
       continue;
     }
 
-    if (key == kNumCTAInCGA) {
-      auto result = validateNumCTAInCGA(param.getValue(), context);
-      if (!result.isValid())
-        res = emitDiagnostic(loc) << result.errorMessage;
-    } else if (key == kNumWorkerWarpsPerCTA) {
-      auto result = validateNumWorkerWarpsPerCTA(param.getValue(), context);
-      if (!result.isValid())
-        res = emitDiagnostic(loc) << result.errorMessage;
-    } else if (key == kAllowTMA) {
-      auto result = validateAllowTMA(param.getValue(), context);
-      if (!result.isValid())
-        res = emitDiagnostic(loc) << result.errorMessage;
-    } else if (key == kLatency) {
-      auto result = validateLatency(param.getValue(), context);
-      if (!result.isValid())
-        res = emitDiagnostic(loc) << result.errorMessage;
-    } else if (key == kOccupancy) {
-      auto result = validateOccupancy(param.getValue(), context);
-      if (!result.isValid())
-        res = emitDiagnostic(loc) << result.errorMessage;
-    } else {
-      // Unknown parameter
+#define CUDA_TILE_HINT_KEY(Name, Str, RetType, Version)                        \
+  if (key == stringifyHintKey(HintKey::Name)) {                                \
+    verifyOneHint(param.getValue(), context, loc, res, validate##Name);        \
+  } else
+#include "cuda_tile/Dialect/CudaTile/IR/HintKeyAccessors.inc"
+    {
       res = emitDiagnostic(loc)
             << "unknown param " << key << " for " << context;
     }
@@ -270,18 +217,9 @@ LogicalResult OptimizationHintsAttr::verifyWithOp(Operation *op,
   bool errorOnHints = cast<CudaTileDialect>(getDialect()).getErrorOnHints();
   SmallVector<StringRef, 4> keysValidForOperation;
   if (op != nullptr) {
-    // Initialize list of supported hints for EntryOp
-    if (isa<EntryOp>(op)) {
-      keysValidForOperation.push_back(kNumCTAInCGA);
-      keysValidForOperation.push_back(kNumWorkerWarpsPerCTA);
-      keysValidForOperation.push_back(kOccupancy);
-    }
-    // Initialize list of supported hints for Load/Store Ops
-    if (isa<LoadViewTkoOp, StoreViewTkoOp, LoadPtrTkoOp, StorePtrTkoOp>(op)) {
-      keysValidForOperation.push_back(kLatency);
-      if (isa<LoadViewTkoOp, StoreViewTkoOp>(op))
-        keysValidForOperation.push_back(kAllowTMA);
-    }
+#define CUDA_TILE_HINT_OP_KEYS
+#include "cuda_tile/Dialect/CudaTile/IR/HintKeyImpl.inc"
+#undef CUDA_TILE_HINT_OP_KEYS
   }
 
   for (NamedAttribute entry : value.getValue()) {
@@ -293,78 +231,24 @@ LogicalResult OptimizationHintsAttr::verifyWithOp(Operation *op,
              << "expected dictionary attribute for optimization_hints entry `"
              << key << "` got value=" << entry.getValue();
 
-    if (failed(
-            verifyParamWithContext(loc, key, keysValidForOperation, innerDict)))
+    if (failed(verifyParamWithContext(loc, key, keysValidForOperation,
+                                      innerDict))) {
       if (errorOnHints)
         return failure();
+    }
   }
 
   return success();
 }
 
-std::optional<int> OptimizationHintsAttr::getNumCTAInCGA(StringRef sm) {
-  auto attrOpt = getAttributeForSmOrDefault(getValue(), sm, kNumCTAInCGA);
-  if (!attrOpt)
-    return std::nullopt;
-
-  // Validate without constructing error message (key not passed)
-  auto result = validateNumCTAInCGA(*attrOpt, sm);
-  if (result.isValid())
-    return static_cast<int>(*result.value);
-
-  return std::nullopt;
-}
-
-std::optional<int>
-OptimizationHintsAttr::getNumWorkerWarpsPerCTA(StringRef sm) {
-  auto attrOpt =
-      getAttributeForSmOrDefault(getValue(), sm, kNumWorkerWarpsPerCTA);
-  if (!attrOpt)
-    return std::nullopt;
-
-  // Validate without constructing error message (key not passed)
-  auto result = validateNumWorkerWarpsPerCTA(*attrOpt, sm);
-  if (result.isValid())
-    return static_cast<int>(*result.value);
-
-  return std::nullopt;
-}
-
-std::optional<bool> OptimizationHintsAttr::getAllowTMA(StringRef sm) {
-  auto attrOpt = getAttributeForSmOrDefault(getValue(), sm, kAllowTMA);
-  if (!attrOpt)
-    return std::nullopt;
-
-  // Validate without constructing error message (key not passed)
-  auto result = validateAllowTMA(*attrOpt, sm);
-  return result.value;
-}
-
-std::optional<int> OptimizationHintsAttr::getLatency(StringRef sm) {
-  auto attrOpt = getAttributeForSmOrDefault(getValue(), sm, kLatency);
-  if (!attrOpt)
-    return std::nullopt;
-
-  // Validate without constructing error message (key not passed)
-  auto result = validateLatency(*attrOpt, sm);
-  if (result.isValid())
-    return static_cast<int>(*result.value);
-
-  return std::nullopt;
-}
-
-std::optional<int> OptimizationHintsAttr::getOccupancy(StringRef sm) {
-  auto attrOpt = getAttributeForSmOrDefault(getValue(), sm, kOccupancy);
-  if (!attrOpt)
-    return std::nullopt;
-
-  // Validate without constructing error message (key not passed)
-  auto result = validateOccupancy(*attrOpt, sm);
-  if (result.isValid())
-    return static_cast<int>(*result.value);
-
-  return std::nullopt;
-}
+// Getter definitions — template + X-macro expansion from HintKeyAccessors.inc.
+#define CUDA_TILE_HINT_KEY(Name, Str, RetType, Version)                        \
+  std::optional<RetType> OptimizationHintsAttr::get##Name(StringRef sm,        \
+                                                          Operation *op) {     \
+    return getHintValue<RetType>(getValue(), sm, HintKey::Name,                \
+                                 validate##Name, op);                          \
+  }
+#include "cuda_tile/Dialect/CudaTile/IR/HintKeyAccessors.inc"
 
 Attribute OptimizationHintsAttr::parse(AsmParser &parser, Type odsType) {
   if (parser.parseLess())
@@ -396,8 +280,10 @@ Attribute OptimizationHintsAttr::parse(AsmParser &parser, Type odsType) {
     entries.append(key, dataDict);
     return success();
   };
-  if (parser.parseCommaSeparatedList(AsmParser::Delimiter::None, parseOneEntry))
+  if (parser.parseCommaSeparatedList(AsmParser::Delimiter::None,
+                                     parseOneEntry)) {
     return {};
+  }
   if (parser.parseGreater())
     return {};
 

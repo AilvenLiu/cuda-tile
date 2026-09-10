@@ -1225,46 +1225,81 @@ entry @floordivi() {
     // CHECK-LABEL: entry @powf
     // CHECK: %[[c42_f16:.*]] = constant <f16: 4.200000e+01> : tile<f16>
     %c42_f16 = constant <f16: 42.000000e+00> : !cuda_tile.tile<f16>
-    // CHECK: pow %[[c42_f16]], %[[c42_f16]] : tile<f16>
-    %pow_f16 = pow %c42_f16, %c42_f16 : tile<f16>
+    // CHECK: fpowf %[[c42_f16]], %[[c42_f16]] : tile<f16>
+    %pow_f16 = fpowf %c42_f16, %c42_f16 : tile<f16>
 
     // CHECK: %[[c42_bf16:.*]] = constant <bf16: 4.200000e+01> : tile<bf16>
     %c42_bf16 = constant <bf16: 42.000000e+00> : !cuda_tile.tile<bf16>
-    // CHECK: pow %[[c42_bf16]], %[[c42_bf16]] : tile<bf16>
-    %pow_bf16 = pow %c42_bf16, %c42_bf16 : tile<bf16>
+    // CHECK: fpowf %[[c42_bf16]], %[[c42_bf16]] : tile<bf16>
+    %pow_bf16 = fpowf %c42_bf16, %c42_bf16 : tile<bf16>
 
     // CHECK: %[[c42_f32:.*]] = constant <f32: 4.200000e+01> : tile<f32>
     %c42_f32 = constant <f32: 42.000000e+00> : !cuda_tile.tile<f32>
-    // CHECK: pow %[[c42_f32]], %[[c42_f32]] : tile<f32>
-    %pow_f32 = pow %c42_f32, %c42_f32 : tile<f32>
+    // CHECK: fpowf %[[c42_f32]], %[[c42_f32]] : tile<f32>
+    %pow_f32 = fpowf %c42_f32, %c42_f32 : tile<f32>
 
     // CHECK: %[[c42_f64:.*]] = constant <f64: 4.200000e+01> : tile<f64>
     %c42_f64 = constant <f64: 42.000000e+00> : !cuda_tile.tile<f64>
-    // CHECK: pow %[[c42_f64]], %[[c42_f64]] : tile<f64>
-    %pow_f64 = pow %c42_f64, %c42_f64 : tile<f64>
+    // CHECK: fpowf %[[c42_f64]], %[[c42_f64]] : tile<f64>
+    %pow_f64 = fpowf %c42_f64, %c42_f64 : tile<f64>
+  }
+
+  entry @powi() {
+    // CHECK-LABEL: entry @powi
+    // CHECK: %[[c42_f32:.*]] = constant <f32: 4.200000e+01> : tile<f32>
+    %c42_f32 = constant <f32: 42.000000e+00> : !cuda_tile.tile<f32>
+    // CHECK: %[[c1_i1:.*]] = constant <i1: true> : tile<i1>
+    %c1_i1 = constant <i1: true> : !cuda_tile.tile<i1>
+    // CHECK: fpowi %[[c42_f32]], %[[c1_i1]] : tile<f32>, tile<i1>
+    %pow_i1 = fpowi %c42_f32, %c1_i1 : tile<f32>, tile<i1>
+
+    // CHECK: %[[c2_i8:.*]] = constant <i8: 2> : tile<i8>
+    %c2_i8 = constant <i8: 2> : !cuda_tile.tile<i8>
+    // CHECK: fpowi %[[c42_f32]], %[[c2_i8]] : tile<f32>, tile<i8>
+    %pow_i8 = fpowi %c42_f32, %c2_i8 : tile<f32>, tile<i8>
+
+    // CHECK: %[[c2_i16:.*]] = constant <i16: 2> : tile<i16>
+    %c2_i16 = constant <i16: 2> : !cuda_tile.tile<i16>
+    // CHECK: fpowi %[[c42_f32]], %[[c2_i16]] : tile<f32>, tile<i16>
+    %pow_i16 = fpowi %c42_f32, %c2_i16 : tile<f32>, tile<i16>
+
+    // CHECK: %[[c2_i32:.*]] = constant <i32: 2> : tile<i32>
+    %c2_i32 = constant <i32: 2> : !cuda_tile.tile<i32>
+    // CHECK: fpowi %[[c42_f32]], %[[c2_i32]] : tile<f32>, tile<i32>
+    %pow_i32 = fpowi %c42_f32, %c2_i32 : tile<f32>, tile<i32>
+  }
+
+  entry @powi_tensor() {
+    // CHECK-LABEL: entry @powi_tensor
+    // CHECK: %[[c_f32tensor:.*]] = constant <f32: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf32>
+    %c_f32tensor = constant <f32: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf32>
+    // CHECK: %[[c_i32tensor:.*]] = constant <i32: {{\[}}[1, 2], [4, 5]]> : tile<2x2xi32>
+    %c_i32tensor = constant <i32: [[1, 2], [4, 5]]> : !cuda_tile.tile<2x2xi32>
+    // CHECK: fpowi %[[c_f32tensor]], %[[c_i32tensor]] : tile<2x2xf32>, tile<2x2xi32>
+    %res_i32tensor = fpowi %c_f32tensor, %c_i32tensor : tile<2x2xf32>, tile<2x2xi32>
   }
 
   entry @powf_tensor() {
     // CHECK-LABEL: entry @powf_tensor
     // CHECK: %[[c_f16tensor:.*]] = constant <f16: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf16>
     %c_f16tensor = constant <f16: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf16>
-    // CHECK: pow %[[c_f16tensor]], %[[c_f16tensor]] : tile<2x2xf16>
-    %res_f16tensor = pow %c_f16tensor, %c_f16tensor : tile<2x2xf16>
+    // CHECK: fpowf %[[c_f16tensor]], %[[c_f16tensor]] : tile<2x2xf16>
+    %res_f16tensor = fpowf %c_f16tensor, %c_f16tensor : tile<2x2xf16>
 
     // CHECK: %[[c_bf16tensor:.*]] = constant <bf16: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xbf16>
     %c_bf16tensor = constant <bf16: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xbf16>
-    // CHECK: pow %[[c_bf16tensor]], %[[c_bf16tensor]] : tile<2x2xbf16>
-    %res_bf16tensor = pow %c_bf16tensor, %c_bf16tensor : tile<2x2xbf16>
+    // CHECK: fpowf %[[c_bf16tensor]], %[[c_bf16tensor]] : tile<2x2xbf16>
+    %res_bf16tensor = fpowf %c_bf16tensor, %c_bf16tensor : tile<2x2xbf16>
 
     // CHECK: %[[c_f32tensor:.*]] = constant <f32: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf32>
     %c_f32tensor = constant <f32: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf32>
-    // CHECK: pow %[[c_f32tensor]], %[[c_f32tensor]] : tile<2x2xf32>
-    %res_f32tensor = pow %c_f32tensor, %c_f32tensor : tile<2x2xf32>
+    // CHECK: fpowf %[[c_f32tensor]], %[[c_f32tensor]] : tile<2x2xf32>
+    %res_f32tensor = fpowf %c_f32tensor, %c_f32tensor : tile<2x2xf32>
 
     // CHECK: %[[c_f64tensor:.*]] = constant <f64: {{\[}}[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : tile<2x2xf64>
     %c_f64tensor = constant <f64: [[1.000000e+00, 2.000000e+00], [4.000000e+00, 5.000000e+00]]> : !cuda_tile.tile<2x2xf64>
-    // CHECK: pow %[[c_f64tensor]], %[[c_f64tensor]] : tile<2x2xf64>
-    %res_f64tensor = pow %c_f64tensor, %c_f64tensor : tile<2x2xf64>
+    // CHECK: fpowf %[[c_f64tensor]], %[[c_f64tensor]] : tile<2x2xf64>
+    %res_f64tensor = fpowf %c_f64tensor, %c_f64tensor : tile<2x2xf64>
   }
 
   entry @rsqrtf() {

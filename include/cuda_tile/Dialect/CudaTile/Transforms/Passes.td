@@ -101,4 +101,23 @@ def LoopSplitPass : InterfacePass<"loop-split", "mlir::FunctionOpInterface"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// CudaTileLICM
+//===----------------------------------------------------------------------===//
+
+def CudaTileLICMPass : InterfacePass<"cuda-tile-licm", "mlir::FunctionOpInterface"> {
+  let summary = "Hoist loop-invariant operations out of cuda_tile.for and cuda_tile.loop";
+  let description = [{
+    Performs loop-invariant code motion on cuda_tile.for and cuda_tile.loop
+    operations. An operation is hoisted before the enclosing loop if it is
+    side-effect-free, safe to speculate, not a terminator, and all of its
+    operands are defined outside the loop or are themselves loop-invariant.
+
+    The pass recursively scans into cuda_tile.if/cuda_tile.scan/cuda_tile.reduce
+    regions to hoist invariant ops from inside branches.
+    It processes loops inner-to-outer (post-order) so that invariants cascade
+    through nested loops to the outermost legal position.
+  }];
+}
+
 #endif // CUDATILE_DIALECT_CUDATILE_TRANSFORMS_PASSES_TD

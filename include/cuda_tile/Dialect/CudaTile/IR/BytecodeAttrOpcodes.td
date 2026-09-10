@@ -50,7 +50,7 @@ def : BytecodeAttrTag<"Bounded", 12>;
 
 #ifdef TILE_IR_INCLUDE_TESTS
 // Testing Attribute Tags - Only available in testing builds.
-def : BytecodeAttrTag<"BytecodeTestValue", 200>;
+def : BytecodeAttrTag<"BytecodeTestEvolved", 200>;
 #endif // TILE_IR_INCLUDE_TESTS
 
 #endif // CUDATILE_DIALECT_CUDATILE_IR_BYTECODE_ATTR_OPCODES_TD

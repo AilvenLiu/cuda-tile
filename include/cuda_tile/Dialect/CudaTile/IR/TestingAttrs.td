@@ -37,20 +37,23 @@ def CudaTile_BytecodeTestPriorityAttr
 }
 
 //===----------------------------------------------------------------------===//
-// Testing Standalone Attribute - for attribute tag versioning tests
+// Testing Evolved Attribute - Attr that evolved from 250.0 to 250.1
 //===----------------------------------------------------------------------===//
 
-// Simple attribute introduced in 250.1 for testing attribute tag versioning.
-// This attribute just stores a single integer value.
-def CudaTile_BytecodeTestValueAttr : CudaTileAttrDef<"BytecodeTestValue",
-    "bytecode_test_value", "250.1"> {
-  let summary = "Testing attribute for bytecode versioning";
+// Mirrors BytecodeTestEvolvedType for types.
+def CudaTile_BytecodeTestEvolvedAttr : CudaTileAttrDef<"BytecodeTestEvolved",
+    "bytecode_test_evolved_attr", "250.0"> {
+  let summary = "Testing attribute for parameter evolution (250.0 -> 250.1)";
   let description = [{
-    A simple attribute introduced in version 250.1 for testing that
-    attribute tag versioning works correctly.
+    Attribute that evolved across versions:
+    - Version 250.0: Only has `baseValue` (int64_t)
+    - Version 250.1: Added `optionalValue` (std::optional<int64_t>)
   }];
-  let parameters = (ins "int64_t":$value);
-  let assemblyFormat = "`<` $value `>`";
+  let parameters = (ins
+    CudaTileAttrParam<TypeParameter<"int64_t", "base value">, "250.0">:$baseValue,
+    CudaTileAttrParam<OptionalParameter<"std::optional<int64_t>",
+        "optional value added in 250.1">, "250.1">:$optionalValue);
+  let assemblyFormat = "`<` $baseValue (`,` $optionalValue^)? `>`";
 }
 
 #endif // CUDATILE_DIALECT_CUDATILE_IR_TESTINGATTRS_TD

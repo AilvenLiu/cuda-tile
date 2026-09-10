@@ -233,5 +233,5 @@ cuda_tile.module @kernels {
 // CHECK: invalid operation debug info scope
 // CHECK: Global variables must not have scope
 cuda_tile.module @kernels {
-  "some.op"() : () -> () loc(#di_loc_func)
+  cuda_tile.global @glob <i32: [42]> : !cuda_tile.tile<1xi32> loc(#di_loc_func)
 }

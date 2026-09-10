@@ -33,15 +33,18 @@ public:
     uint8_t verMajor, verMinor;
     if (versionStr.consumeInteger(10, verMajor) ||
         !versionStr.consume_front(".") ||
-        versionStr.consumeInteger(10, verMinor))
+        versionStr.consumeInteger(10, verMinor)) {
       return o.error("Invalid argument '" + arg + "'");
+    }
 
     // Parse the `.tag`.
     uint16_t tag = 0;
-    if (versionStr.consume_front(".") && versionStr.consumeInteger(10, tag))
+    if (versionStr.consume_front(".") && versionStr.consumeInteger(10, tag)) {
       return o.error("Invalid argument '" + arg + "'");
-    if (!versionStr.empty())
+    }
+    if (!versionStr.empty()) {
       return o.error("Invalid argument '" + arg + "'");
+    }
 
     std::optional<BytecodeVersion> version =
         BytecodeVersion::fromVersion(verMajor, verMinor, tag);
@@ -115,8 +118,9 @@ void mlir::cuda_tile::registerListVersionsOption() {
       llvm::cl::init(false), llvm::cl::callback([](const bool &val) {
         if (val) {
           auto versions = getSupportedVersions();
-          for (const auto &version : versions)
+          for (const auto &version : versions) {
             llvm::outs() << version.toString() << "\n";
+          }
           exit(0);
         }
       }));

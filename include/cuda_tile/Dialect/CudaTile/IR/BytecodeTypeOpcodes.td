@@ -83,4 +83,5 @@ def : IntegerTypeTag<"Int4", 22, 4>;
 def : CudaTileTypeTag<"BytecodeTestEvolvedType", 200>;
 #endif // TILE_IR_INCLUDE_TESTS
 
+def : FloatTypeTag<"Float8E5M3FNU", 0x82, "Float8E5M3FNUType">;
 #endif // CUDATILE_DIALECT_CUDATILE_IR_BYTECODE_TYPE_OPCODES_TD

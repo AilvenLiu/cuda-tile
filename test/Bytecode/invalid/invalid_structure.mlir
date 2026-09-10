@@ -11,7 +11,7 @@
 // Version
 //===--------------------------------------------------------------------===//
 // RUN: not cuda-tile-translate -cudatilebc-to-mlir %S/unsupported_version.tileirbc -no-implicit-module 2>&1 | FileCheck %s --check-prefix=VERSION
-// VERSION: unsupported Tile version 18.0.0, this reader supports versions [13.1 - 13.3]
+// VERSION: unsupported Tile version 18.0.0, this reader supports versions [13.1 - 13.4]
 
 //===--------------------------------------------------------------------===//
 // Section ID
@@ -36,3 +36,10 @@
 //===--------------------------------------------------------------------===//
 // RUN: not cuda-tile-translate -cudatilebc-to-mlir %S/invalid_attribute_name.bc -no-implicit-module 2>&1 | FileCheck %s --check-prefix=ATTR_NAME
 // ATTR_NAME: invalid empty attribute name for DictionaryAttr element 0
+
+//===--------------------------------------------------------------------===//
+// Constant rawDataSize additive overflow
+//===--------------------------------------------------------------------===//
+// A constant blob whose DenseElementsAttr `rawDataSize` varint is ~2^64.
+// RUN: not cuda-tile-translate -cudatilebc-to-mlir %S/constant_rawdatasize_overflow.tileirbc -no-implicit-module 2>&1 | FileCheck %s --check-prefix=RAW_OVERFLOW
+// RAW_OVERFLOW: failed to read the raw byte data

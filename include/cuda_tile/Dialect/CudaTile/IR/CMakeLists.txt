@@ -31,6 +31,14 @@ set(LLVM_TARGET_DEFINITIONS Ops.td)
 mlir_tablegen(Ops.h.inc -gen-op-decls)
 mlir_tablegen(Ops.cpp.inc -gen-op-defs)
 
+# Attribute code generation (from cuda-tile-tblgen).
+set(LLVM_TARGET_DEFINITIONS AttrDefs.td)
+tablegen(CUDA_TILE CudaTileEnumAttrs.inc -gen-enum-attr-list)
+tablegen(CUDA_TILE GpuArchitectures.inc -gen-gpu-arch-def)
+tablegen(CUDA_TILE GpuArchConstants.inc -gen-gpu-arch-constants)
+tablegen(CUDA_TILE HintKeyAccessors.inc -gen-hint-key-accessors)
+tablegen(CUDA_TILE HintKeyImpl.inc -gen-hint-key-impl)
+
 add_public_tablegen_target(CudaTileIncGen)
 add_dependencies(mlir-headers CudaTileIncGen)
 

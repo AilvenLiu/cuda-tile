@@ -22,10 +22,16 @@ bool OpTrait::cuda_tile::impl::verifyLoadStoreType(Type dstType, Type srcType) {
 
   auto dstTensorType = cast<TileType>(dstType);
   auto srcTensorType = cast<TileType>(srcType);
-  auto srcPointerType = cast<PointerType>(srcTensorType.getElementType());
+
+  Type pointeeType;
+  if (auto ptrTy = dyn_cast<PointerType>(srcTensorType.getElementType())) {
+    pointeeType = ptrTy.getPointeeType();
+  } else {
+    return false;
+  }
 
   return srcTensorType.getShape() == dstTensorType.getShape() &&
-         srcPointerType.getPointeeType() == dstTensorType.getElementType();
+         pointeeType == dstTensorType.getElementType();
 }
 
 bool OpTrait::cuda_tile::impl::verifyLoadStoreMask(Type resultType,

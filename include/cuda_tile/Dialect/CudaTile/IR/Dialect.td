@@ -60,6 +60,12 @@ def CudaTile_Dialect : Dialect {
     /// Set whether to treat unsupported/invalid hints as errors (vs warnings).
     void setErrorOnHints(bool value) { errorOnHints_ = value; }
 
+    /// Set the remark finalizer.
+    void setRemarkFinalizer(remark::InFlightRemark::Finalizer finalizer) { finalizer_ = finalizer; }
+
+    /// Get the remark finalizer.
+    remark::InFlightRemark::Finalizer getRemarkFinalizer() { return finalizer_; }
+
   private:
     void registerAttributes();
     void registerTypes();
@@ -71,6 +77,11 @@ def CudaTile_Dialect : Dialect {
     /// Whether to treat unsupported/invalid hints as errors (requires warnUnsupportedHints_).
     /// Default: false (warnings only).
     bool errorOnHints_ = false;
+
+    /// The finalizer to use for remarks emitted during compilation. This is a backup
+    /// for any finalizer that's provided by the user directly in the API, and is only
+    /// used if the user provides nothing directly.
+    remark::InFlightRemark::Finalizer finalizer_;
   }];
 }
 
@@ -97,6 +108,13 @@ class CudaTileOpDef<string mnemonic, string version, string group, string subGro
   CudaTileOpMetadata metadata = CudaTileOpMetadata<version, group, subGroup>;
 }
 
+// Helper: a typed array attribute constraint whose elements must satisfy the
+// given element constraint. Use this in op arguments for ArrayAttr-backed
+// fields that need element verification without introducing a dedicated attr
+// mnemonic.
+class CudaTileArrayOf<Attr element> : TypedArrayAttrBase<element,
+    "array of " # element.summary # " values">;
+
 
 //===----------------------------------------------------------------------===//
 // Integer 32-bit Enum Attribute
@@ -107,6 +125,22 @@ class CudaTileI32EnumAttrCase<string desc, string sym, int val, string version,
     : I32EnumAttrCase<sym, val, str> {
   string description = desc;
   string sinceVersion = version;
+}
+
+// GPU architecture enum case with an architecture family name.
+// Used by -gen-gpu-arch-constants to generate per-family constants and ranges.
+class CudaTileGpuArchCase<string desc, string sym, int val,
+                          string version, string str, string family>
+    : CudaTileI32EnumAttrCase<desc, sym, val, version, str> {
+  string archFamily = family;
+}
+
+// Per-architecture range override for optimization hint validation.
+// Narrows the valid range for specific GPU architecture families.
+class HintArchOverride<list<string> families, int minVal, int maxVal> {
+  list<string> archFamilies = families;
+  int overrideMin = minVal;
+  int overrideMax = maxVal;
 }
 
 class CudaTileI32EnumAttr<string name, string desc, string version,
@@ -213,6 +247,12 @@ class OnlyVariants<list<string> selectedVariants> : OpVariableDecorator {
   list<string> variants = selectedVariants;
 }
 
+// Marks a required attribute whose rank must match the rank of a sibling
+// operand on the same operation. The `operandName` must refer to a variadic operand defined on the same op.
+class RequireSameOperandRank<string operandName> : OpVariableDecorator {
+  string rankOperand = operandName;
+}
+
 // The wrapper class for declaring arguments for CudaTile operations.
 class CudaTileArg<Constraint constraint, string desc, string version, list<OpVariableDecorator> decorators = []>
   : Arg<constraint, desc, decorators # [CudaTileArgMetadata<version, desc>]>;
@@ -271,6 +311,36 @@ class CudaTileAttrDef<string attrName, string attrMnemonic, string version,
   list<string> mlirExamples = [];
 
   list<Table> descriptionTables = [];
+}
+
+// The wrapper for attribute parameters with version information.
+// Mirrors CudaTileTypeParam for types.
+class CudaTileAttrParam<AttrOrTypeParameter param, string version>
+  : AttrOrTypeParameter<param.cppType, param.summary, param.cppAccessorType> {
+  // Version when this parameter was introduced.
+  string sinceVersion = version;
+
+  // Forward all fields from the base parameter.
+  let allocator = param.allocator;
+  let comparator = param.comparator;
+  let cppStorageType = param.cppStorageType;
+  let convertFromStorage = param.convertFromStorage;
+  let syntax = param.syntax;
+  let parser = param.parser;
+  let printer = param.printer;
+  let defaultValue = param.defaultValue;
+}
+
+// Convenience wrapper for string-based attribute parameters.
+class CudaTileStrAttrParam<string cppTypeStr, string desc, string version>
+  : CudaTileAttrParam<TypeParameter<cppTypeStr, desc>, version>;
+
+// Wrapper marking an attribute parameter whose declared C++ type is an
+// AttrInterface.
+class CudaTileAttrInterfaceParam<string interfaceCppType, string version,
+                                 string desc = "">
+  : TypeParameter<interfaceCppType, desc> {
+  string sinceVersion = version;
 }
 
 def CudaTile_DefaultDialect {

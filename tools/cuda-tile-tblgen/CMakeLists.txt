@@ -6,6 +6,7 @@ add_tablegen(cuda-tile-tblgen CUDA_TILE
   DESTINATION "${MLIR_TOOLS_INSTALL_DIR}"
   EXPORT CUDA_TILE
   cuda-tile-tblgen.cpp
+  AttrCodeGen.cpp
   BytecodeAttrAnalysis.cpp
   BytecodeAttrCodeGen.cpp
   BytecodeGen.cpp

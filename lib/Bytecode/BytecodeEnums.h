@@ -72,6 +72,13 @@ enum class FunctionFlags : uint8_t {
   HasOptimizationHints = 0x04,
 };
 
+/// Mask of every flag bit recognized by public builds. Used by the reader to
+/// reject bytecode produced by a different compiler that sets unknown bits.
+inline constexpr uint8_t kPublicFunctionFlagsMask =
+    static_cast<uint8_t>(FunctionFlags::VisibilityPrivate) |
+    static_cast<uint8_t>(FunctionFlags::KindKernel) |
+    static_cast<uint8_t>(FunctionFlags::HasOptimizationHints);
+
 /// Enum representing different attribute kinds in the bytecode.
 /// This enum is auto-generated from BytecodeAttrOpcodes.td.
 #define GEN_ATTR_TAG_ENUM

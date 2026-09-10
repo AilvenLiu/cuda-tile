@@ -60,19 +60,12 @@ public:
 
   LogicalResult matchAndRewrite(cuda_tile::SubFOp op,
                                 PatternRewriter &rewriter) const override {
-    Value c;
-    cuda_tile::MulFOp ab;
+    cuda_tile::MulFOp ab = op.getLhs().getDefiningOp<cuda_tile::MulFOp>();
     Location loc = op.getLoc();
 
-    if ((ab = op.getLhs().getDefiningOp<cuda_tile::MulFOp>()) &&
-        ab.getResult().hasOneUse()) {
-      c = rewriter.createOrFold<cuda_tile::NegFOp>(loc, op.getRhs());
-    } else {
+    if (!ab || !ab.getResult().hasOneUse()) {
       return rewriter.notifyMatchFailure(op, "no mulf op on LHS with one use");
     }
-
-    Value a = ab.getLhs();
-    Value b = ab.getRhs();
 
     // Only fuse if rounding modes and modifiers are the same.
     auto ftz = op.getFlushToZero();
@@ -81,6 +74,10 @@ public:
     if (ftz != ab.getFlushToZero() || rm != ab.getRoundingMode())
       return rewriter.notifyMatchFailure(
           op, "rounding modes and modifiers are not the same");
+
+    Value a = ab.getLhs();
+    Value b = ab.getRhs();
+    Value c = rewriter.createOrFold<cuda_tile::NegFOp>(loc, op.getRhs());
 
     rewriter.replaceOpWithNewOp<cuda_tile::FmaOp>(
         op, a, b, c,

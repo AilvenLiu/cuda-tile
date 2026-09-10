@@ -1,5 +1,6 @@
 
 add_mlir_library(CudaTileBytecodeCommon
+  BytecodeVerification.cpp
   CommandLineOptions.cpp
   Version.cpp
 

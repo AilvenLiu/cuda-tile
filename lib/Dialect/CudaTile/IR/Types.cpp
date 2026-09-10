@@ -88,9 +88,10 @@ parseOptionalPaddingValue(AsmParser &parser) {
 
 /// Parse a type, if type is unprefixed, assume it is from the cuda_tile dialect
 ParseResult cuda_tile::parseCudaTileType(AsmParser &p, Type &type) {
-  // The MLIR builtin dialect now provides a `token` type whose spelling
-  // collides with the cuda_tile `token` mnemonic. Make sure we parse
-  // the token as the cuda_tile token type.
+  // The MLIR builtin dialect now provides an unprefixed `token` type whose
+  // spelling collides with the cuda_tile `token` mnemonic. Without this guard,
+  // the `parseOptionalType` call below would greedily parse the bare `token`
+  // keyword as the builtin type, so route it to the cuda_tile token type first.
   if (succeeded(p.parseOptionalKeyword(cuda_tile::TokenType::getMnemonic()))) {
     type = cuda_tile::TokenType::get(p.getContext());
     return success();
@@ -282,6 +283,7 @@ Type cuda_tile::TensorViewType::parse(AsmParser &parser) {
 
   // Handle strides parsing based on tensor dimensionality
   SmallVector<int64_t> strides;
+  cuda_tile::PtrAttrAttr ptrAttr{};
 
   if (shape.empty()) {
     // For 0-D tensors, check if strides are incorrectly provided
@@ -290,12 +292,23 @@ Type cuda_tile::TensorViewType::parse(AsmParser &parser) {
         parser.emitError(parser.getCurrentLocation())
             << "strides must not be provided for 0-d tiles";
         return Type();
-      } else {
-        // If there's a comma but no 'strides' keyword, that's also an error
-        parser.emitError(parser.getCurrentLocation())
-            << "unexpected token after element type in 0-d tensor_view";
-        return Type();
       }
+      // For 0-D tensors, comma after elementType may introduce ptrAttr.
+      auto optResult = parser.parseOptionalAttribute(ptrAttr);
+      if (optResult.has_value()) {
+        if (failed(optResult.value())) {
+          return Type();
+        }
+        if (parser.parseGreater()) {
+          return Type();
+        }
+        return parser.getChecked<cuda_tile::TensorViewType>(
+            loc, parser.getContext(), elementType, shape, strides, ptrAttr);
+      }
+      // If there's a comma but no valid token after it, that's an error
+      parser.emitError(parser.getCurrentLocation())
+          << "unexpected token after element type in 0-d tensor_view";
+      return Type();
     }
   } else {
     // For non-0D tensors, strides are required
@@ -308,11 +321,21 @@ Type cuda_tile::TensorViewType::parse(AsmParser &parser) {
       return Type();
   }
 
+  // Optionally parse ptrAttr after strides (or after element type for 0-D).
+  if (succeeded(parser.parseOptionalComma())) {
+    auto optResult = parser.parseOptionalAttribute(ptrAttr);
+    if (!optResult.has_value() || failed(optResult.value())) {
+      parser.emitError(parser.getCurrentLocation())
+          << "expected ptr_attr attribute";
+      return Type();
+    }
+  }
+
   if (parser.parseGreater())
     return Type();
 
   return parser.getChecked<cuda_tile::TensorViewType>(
-      loc, parser.getContext(), elementType, shape, strides);
+      loc, parser.getContext(), elementType, shape, strides, ptrAttr);
 }
 
 void cuda_tile::TensorViewType::print(AsmPrinter &printer) const {
@@ -332,6 +355,10 @@ void cuda_tile::TensorViewType::print(AsmPrinter &printer) const {
         },
         ",");
     printer << "]";
+  }
+
+  if (auto ptrAttr = getPtrAttr()) {
+    printer << ", " << ptrAttr;
   }
 
   printer << ">";
@@ -363,7 +390,19 @@ Diagnostic &operator<<(Diagnostic &diag, PrintDynamic v) {
 LogicalResult
 cuda_tile::TensorViewType::verify(function_ref<InFlightDiagnostic()> emitError,
                                   Type elementType, ArrayRef<int64_t> shape,
-                                  ArrayRef<int64_t> stride) {
+                                  ArrayRef<int64_t> stride,
+                                  cuda_tile::PtrAttrAttr ptrAttr) {
+  if (ptrAttr) {
+    switch (ptrAttr.getValue()) {
+    case cuda_tile::PtrAttr::NONE:
+      break;
+    default:
+      return emitError()
+             << "expected ptr_attr to be a valid pointer classification "
+                "but got invalid enum value "
+             << static_cast<int32_t>(ptrAttr.getValue());
+    }
+  }
   if (shape.size() != stride.size())
     return emitError() << "expected shape and stride to be of same rank but "
                           "got shape of rank "

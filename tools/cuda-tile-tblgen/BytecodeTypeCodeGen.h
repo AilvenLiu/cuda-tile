@@ -51,6 +51,10 @@ void generateDeserializerDispatch(const BytecodeTypeStructure &structure,
 void generateDependentTypeRegistration(const BytecodeTypeStructure &structure,
                                        llvm::raw_ostream &os);
 
+/// Generate type tag to version map for MinVersionAnalyzer.
+void generateTypeVersionMap(const BytecodeTypeStructure &structure,
+                            llvm::raw_ostream &os);
+
 } // namespace tblgen
 } // namespace mlir
 

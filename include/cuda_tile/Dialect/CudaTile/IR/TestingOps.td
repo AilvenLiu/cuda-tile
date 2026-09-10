@@ -107,8 +107,8 @@ def CudaTile_BytecodeTest_EvolutionOp :
                   "Optional token added in version 250.1.", "250.1">:$optional_token,
       CudaTileArg<OptionalAttr<CudaTile_BytecodeTestPriorityAttr>,
                   "Priority enum attr added in 250.0.", "250.0">:$priority,
-      CudaTileArg<OptionalAttr<CudaTile_BytecodeTestValueAttr>,
-                  "Standalone attr added in 250.1.", "250.1">:$test_attr);
+      CudaTileArg<OptionalAttr<CudaTile_BytecodeTestEvolvedAttr>,
+                  "Evolved standalone attr available from 250.0.", "250.0">:$test_attr);
 
   let results = (outs
       CudaTileArg<CudaTile_TokenType, "New token result added in version 250.1.", "250.1">:$result_token);

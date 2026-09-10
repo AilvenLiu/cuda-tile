@@ -194,6 +194,19 @@ void emitSummary(StringRef summary, raw_ostream &os) {
   }
 }
 
+static void emitListItemDescription(StringRef description, raw_ostream &os) {
+  SmallVector<StringRef, 8> lines;
+  description.trim().split(lines, '\n');
+  if (lines.empty()) {
+    return;
+  }
+
+  os << lines.front().trim();
+  for (StringRef line : ArrayRef<StringRef>(lines).drop_front()) {
+    os << "\n  " << line.trim();
+  }
+}
+
 /// Emit the given named constraint.
 template <typename T>
 static void emitNamedConstraint(const T &it, raw_ostream &os) {
@@ -480,7 +493,8 @@ static void emitOperationSignature(SpecEmitter &emitter,
   for (auto &parameter : signature.parameters) {
     emitter.os << "- **" << parameter.name << "**";
     emitter.os << " (" << parameter.getTypeDescription() << ")";
-    emitter.os << " - " << parameter.getDescription();
+    emitter.os << " - ";
+    emitListItemDescription(parameter.getDescription(), emitter.os);
     if (!parameter.sinceVersion.empty()) {
       emitter.os << " " << Badge::successLine(parameter.sinceVersion);
     }
@@ -501,7 +515,8 @@ static void emitOperationSignature(SpecEmitter &emitter,
     // emitter.os << "- :spelling:ignore:`**" << parameter.name << "**`";
     emitter.os << "- **" << parameter.name << "**";
     emitter.os << " (" << parameter.getTypeDescription() << ")";
-    emitter.os << " - " << parameter.getDescription();
+    emitter.os << " - ";
+    emitListItemDescription(parameter.getDescription(), emitter.os);
 
     if (!parameter.sinceVersion.empty()) {
       emitter.os << " " << Badge::successLine(parameter.sinceVersion);
@@ -535,8 +550,169 @@ static void emitOperationExample(SpecEmitter &emitter,
 // DESCRIPTION
 //
 // CONSTRAINTS
+/// Emit auto-generated per-hint documentation for OptimizationHintsAttr.
+///
+/// Generates a bullet list where each item contains the hint mnemonic, a
+/// human-readable description, validation constraints (range, power-of-2,
+/// boolean), per-architecture overrides, and a version badge.
+///
+/// \param emitter      The spec output emitter.
+/// \param records      TableGen record keeper (contains HintKey and
+///                     GpuArchitecture enums).
+/// \param opClassName  When non-empty, only hints whose validForOps includes
+///                     this op class are emitted.  Empty means emit all hints.
+static void emitHintKeyDoc(SpecEmitter &emitter, const RecordKeeper &records,
+                           StringRef opClassName = "") {
+  // Find the HintKey enum.
+  const Record *hintKeyEnum = nullptr;
+  for (const auto &def : records.getDefs()) {
+    const Record *cls = records.getClass("CudaTileI32EnumAttr");
+    if (cls && def.second->isSubClassOf(cls) &&
+        def.second->getValueAsString("className") == "HintKey") {
+      hintKeyEnum = def.second.get();
+      break;
+    }
+  }
+  if (!hintKeyEnum) {
+    return;
+  }
+
+  // Collect family -> SM prefix mapping for arch override docs.
+  std::map<std::string, std::vector<std::string>> familyPrefixes;
+  const Record *gpuArchEnum = nullptr;
+  for (const auto &def : records.getDefs()) {
+    const Record *cls = records.getClass("CudaTileI32EnumAttr");
+    if (cls && def.second->isSubClassOf(cls) &&
+        def.second->getValueAsString("className") == "GpuArchitecture") {
+      gpuArchEnum = def.second.get();
+      break;
+    }
+  }
+  if (gpuArchEnum) {
+    for (const auto *c : gpuArchEnum->getValueAsListOfDefs("enumerants")) {
+      std::string family = "Unknown";
+      if (c->getValue("archFamily")) {
+        family = c->getValueAsString("archFamily").str();
+      }
+      familyPrefixes[family].push_back(c->getValueAsString("str").trim().str());
+    }
+  }
+
+  // Emit per-hint bullet list (filtered by op if opClassName is given).
+  emitter.os << "\n";
+  for (const auto *c : hintKeyEnum->getValueAsListOfDefs("enumerants")) {
+    // Filter: only emit hints relevant to this op.
+    if (!opClassName.empty() && c->getValue("hintValidForOps")) {
+      bool appliesToOp = false;
+      for (auto op : c->getValueAsListOfStrings("hintValidForOps")) {
+        if (op == opClassName) {
+          appliesToOp = true;
+          break;
+        }
+      }
+      if (!appliesToOp) {
+        continue;
+      }
+    }
+
+    std::string mnemonic = c->getValueAsString("str").trim().str();
+    std::string docDesc;
+    if (c->getValue("hintDocDescription")) {
+      docDesc = c->getValueAsString("hintDocDescription").str();
+    }
+    if (docDesc.empty()) {
+      docDesc = c->getValueAsString("description").str();
+    }
+
+    std::string validKind;
+    if (c->getValue("hintValidationKind")) {
+      validKind = c->getValueAsString("hintValidationKind").str();
+    }
+    int64_t validMin = 0, validMax = 0;
+    if (c->getValue("hintValidMin")) {
+      validMin = c->getValueAsInt("hintValidMin");
+    }
+    if (c->getValue("hintValidMax")) {
+      validMax = c->getValueAsInt("hintValidMax");
+    }
+
+    // Build constraint text from validation metadata.
+    std::string constraint;
+    if (validKind == "int_range") {
+      constraint = "integer value in range [" + std::to_string(validMin) +
+                   ", " + std::to_string(validMax) + "]";
+    } else if (validKind == "pow2_range") {
+      constraint = "power-of-2 value in range [" + std::to_string(validMin) +
+                   ", " + std::to_string(validMax) + "]";
+    } else if (validKind == "bool") {
+      constraint = "boolean value";
+    } else if (validKind == "string") {
+      constraint = "string value";
+    }
+
+    // Build arch override text.
+    std::string archText;
+    if (c->getValue("hintArchOverrides")) {
+      for (const auto *ovr : c->getValueAsListOfDefs("hintArchOverrides")) {
+        if (!archText.empty()) {
+          archText += "; ";
+        }
+        archText += "restricted to [" +
+                    std::to_string(ovr->getValueAsInt("overrideMin")) + ", " +
+                    std::to_string(ovr->getValueAsInt("overrideMax")) +
+                    "] for ";
+        bool firstFam = true;
+        for (auto fam : ovr->getValueAsListOfStrings("archFamilies")) {
+          if (!firstFam) {
+            archText += " and ";
+          }
+          archText += fam.str();
+          auto it = familyPrefixes.find(fam.str());
+          if (it != familyPrefixes.end()) {
+            archText += " (";
+            bool firstSm = true;
+            for (const auto &sm : it->second) {
+              if (!firstSm) {
+                archText += ", ";
+              }
+              archText += sm;
+              firstSm = false;
+            }
+            archText += ")";
+          }
+          firstFam = false;
+        }
+      }
+    }
+
+    std::string version;
+    if (c->getValue("sinceVersion")) {
+      version = c->getValueAsString("sinceVersion").str();
+    }
+
+    // Emit the bullet.
+    emitter.os << "- :code:`" << mnemonic << "` - " << docDesc;
+    if (!constraint.empty()) {
+      emitter.os << " (" << constraint;
+    }
+    if (!archText.empty()) {
+      emitter.os << "; " << archText;
+    }
+    if (!constraint.empty()) {
+      emitter.os << ")";
+    }
+    emitter.os << ".";
+    if (!version.empty()) {
+      emitter.os << " " << Badge::successLine(version);
+    }
+    emitter.os << "\n";
+  }
+  emitter.os << "\n";
+}
+
 static void emitOpDoc(SpecEmitter &emitter, CudaTileOp &cudaTileOp,
-                      std::vector<const Record *> &attrDefs) {
+                      std::vector<const Record *> &attrDefs,
+                      const RecordKeeper &records) {
   // We can create per-operation badges that we can attach when rendering it.
   std::vector<Badge> badges;
 
@@ -574,6 +750,16 @@ static void emitOpDoc(SpecEmitter &emitter, CudaTileOp &cudaTileOp,
   auto attributes = cudaTileOp.getAttributes();
   for (const auto &enumAttr : attributes) {
     emitAttribute(emitter, enumAttr, attrDefs);
+    // Append auto-generated hint documentation for OptimizationHintsAttr,
+    // filtered to only show hints relevant to this specific op.
+    if (auto *attrDef = std::get_if<TileIRAttrDef>(&enumAttr)) {
+      if (attrDef->name == "OptimizationHints") {
+        StringRef defName = cudaTileOp.op.getDef().getName();
+        StringRef opClassName =
+            defName.starts_with("CudaTile_") ? defName.substr(9) : defName;
+        emitHintKeyDoc(emitter, records, opClassName);
+      }
+    }
   }
 
   // Emit the description tables.
@@ -759,7 +945,7 @@ void cudatile::tblgen::generateSpec(
       Operator op(opDef);
       CudaTileOp cudaTileOp(op);
       // Call emitOpDoc with the emitter and the operation.
-      emitOpDoc(emitter, cudaTileOp, attrDefs);
+      emitOpDoc(emitter, cudaTileOp, attrDefs, records);
     }
 
   }

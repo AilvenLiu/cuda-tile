@@ -60,9 +60,9 @@ TileIREnumAttr TileIREnumAttr::fromTableGen(
   attr.opName = opName;
   attr.name = cleanName(enumInfoRecord.getName());
   attr.prefixDescription =
-      enumInfoRecord.getValueAsString("specPrefixDescription");
+      enumInfoRecord.getValueAsString("specPrefixDescription").str();
   attr.suffixDescription =
-      enumInfoRecord.getValueAsString("specSuffixDescription");
+      enumInfoRecord.getValueAsString("specSuffixDescription").str();
 
   auto enumerants = enumInfoRecord.getValueAsListOfDefs("enumerants");
   for (const auto &enumerant : enumerants) {

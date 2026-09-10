@@ -215,6 +215,11 @@ static ForOp copyLoop(RewriterBase &rewriter, ForOp forOp, CmpIOp cmpOp,
     // Current operation is IfOp that we split
     IfOp ifOp = cast<IfOp>(op);
     bool is_continue = false;
+    // If cloning the else side but the else region is empty (then-only IfOp),
+    // skip this IfOp. A then-only IfOp with a false condition has no effect.
+    if (!cloneThen && ifOp.getElseRegion().empty()) {
+      continue;
+    }
     Region &region = cloneThen ? ifOp.getThenRegion() : ifOp.getElseRegion();
     for (Operation &subOp : region.front()) {
       // Copy all operations from one of the regions
@@ -264,7 +269,7 @@ static void performLoopSplit(RewriterBase &rewriter, ForOp forOp,
                              bool secondThen, bool copyCmp) {
   Location loc = forOp.getLoc();
   Value step = forOp.getStep();
-  auto constStep = llvm::dyn_cast<ConstantOp>(step.getDefiningOp());
+  auto constStep = llvm::dyn_cast_or_null<ConstantOp>(step.getDefiningOp());
   ValueRange iterArgs = forOp.getInitValues();
   Value lb = forOp.getLowerBound();
   Value ub = forOp.getUpperBound();

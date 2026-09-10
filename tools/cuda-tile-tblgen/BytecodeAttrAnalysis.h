@@ -13,12 +13,18 @@
 // TableGen attribute definitions into intermediate representations suitable
 // for bytecode generation and validation.
 //
+// Structure mirrors BytecodeTypeAnalysis.h:
+//   - BytecodeAttrParameter: Analyzed parameter.
+//   - CudaTileSerializableAttr: Analyzed attr.
+//   - BytecodeAttrStructure: Complete analysis result
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef CUDA_TILE_TOOLS_TBLGEN_BYTECODE_ATTR_ANALYSIS_H_
 #define CUDA_TILE_TOOLS_TBLGEN_BYTECODE_ATTR_ANALYSIS_H_
 
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/TableGen/AttrOrTypeDef.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TableGen/Record.h"
@@ -26,6 +32,91 @@
 #include <string>
 
 namespace mlir::tblgen {
+
+//===----------------------------------------------------------------------===//
+// BytecodeAttrParameter - Analyzed parameter information
+//===----------------------------------------------------------------------===//
+
+/// Represents a single attribute parameter after TableGen analysis.
+/// Fields:
+///   name: Parameter name from TableGen.
+///   accessorName: MLIR-generated getter.
+///   cppType: Return type of getter.
+///   cppStorageType: Storage type.
+///   isOptional: True for OptionalParameter.
+///   isSigned: True for signed integer types.
+///   kind: Wire format classification.
+///   sinceVersion: Version when parameter was introduced.
+///   defaultValue: Default value for parameter.
+struct BytecodeAttrParameter {
+  enum class Kind {
+    VarInt,
+    APInt,
+    DenseArray,
+    EnumValue,
+    TypeAttr,
+    NestedAttr,
+    PolymorphicNestedAttr,
+    AttributeArray,
+    StringAttr,
+    StringRef,
+  };
+
+  BytecodeAttrParameter(const AttrOrTypeParameter &param);
+
+private:
+  /// Classify parameter kind based on the parameter's TableGen record and,
+  /// failing that, on its C++ type spelling.
+  static Kind classifyParameter(const AttrOrTypeParameter &param);
+
+public:
+  std::string name;
+  std::string accessorName;
+  std::string cppType;
+  std::string cppStorageType;
+  bool isOptional;
+  bool isSigned = false;
+  Kind kind;
+  std::string sinceVersion;
+  std::string defaultValue;
+};
+
+//===----------------------------------------------------------------------===//
+// CudaTileSerializableAttr - Analyzed attribute for serialization
+//===----------------------------------------------------------------------===//
+
+/// Represents a CudaTile attribute that needs parameter-based bytecode
+/// serialization. Mirrors CudaTileType structure.
+/// Fields:
+///   attrName: C++ class name.
+///   tagName: AttributeTag enum name.
+///   qualifiedCppName: Fully qualified C++ name.
+///   tagValue: Wire format tag number.
+///   sinceVersion: Version string.
+///   parameters: Analyzed attribute parameters.
+///   skipVersionCheck: True when version-gating is suppressed for this attr.
+///   hasOptionalParams: True if attr has optional parameters.
+///   requiredParamsFirst: True if required params come before flags
+///   hasVerifier: True if attr has genVerifyDecl.
+struct CudaTileSerializableAttr {
+  CudaTileSerializableAttr(const AttrOrTypeDef &attrDef, unsigned tagValue,
+                           StringRef version, bool skipVersionCheck);
+
+  std::string attrName;
+  std::string tagName;
+  std::string qualifiedCppName;
+  unsigned tagValue;
+  std::string sinceVersion;
+  SmallVector<BytecodeAttrParameter, 4> parameters;
+  bool skipVersionCheck = false;
+  bool hasOptionalParams = false;
+  bool requiredParamsFirst = false;
+  bool hasVerifier = false;
+};
+
+//===----------------------------------------------------------------------===//
+// BytecodeAttr - Tag assignment and version info
+//===----------------------------------------------------------------------===//
 
 /// Represents an attribute with bytecode tag assignment and version info.
 /// Version is looked up from CudaTileAttrAlias (for MLIR builtins) or
@@ -50,7 +141,7 @@ struct CudaTileEnumAttr {
   std::string attrName;
   std::string sinceVersion;
   bool skipsVersionCheck = false;
-  llvm::SmallVector<EnumCase, 4> cases;
+  SmallVector<EnumCase, 4> cases;
 };
 
 /// Analyzed bytecode attribute structure for code generation.
@@ -58,12 +149,15 @@ struct CudaTileEnumAttr {
 ///   - AttributeTag enum (from bytecodeAttrs, sorted by tagValue)
 ///   - Version check functions (from bytecodeAttrs, enumAttrs)
 ///   - Type traits for enum attrs (from enumAttrs)
+///   - Serializers/deserializers (from serializableAttrs)
 /// Fields:
 ///   bytecodeAttrs: Attrs with bytecode tag assignments, sorted by tagValue.
 ///   enumAttrs: Enum attrs for type trait and version check generation.
+///   serializableAttrs: CudaTile attrs with full parameter analysis.
 struct BytecodeAttrStructure {
-  llvm::SmallVector<BytecodeAttr, 0> bytecodeAttrs;
-  llvm::SmallVector<CudaTileEnumAttr, 0> enumAttrs;
+  SmallVector<BytecodeAttr, 0> bytecodeAttrs;
+  SmallVector<CudaTileEnumAttr, 0> enumAttrs;
+  SmallVector<CudaTileSerializableAttr, 0> serializableAttrs;
 };
 
 /// Parse and analyze bytecode attribute information from TableGen records.

@@ -6,6 +6,7 @@ set(CudaTileDialect_SOURCES
   Attributes.cpp
   CudaTile.cpp
   Interfaces.cpp
+  Remark.cpp
   Types.cpp
   Traits.cpp
 )
@@ -31,10 +32,12 @@ add_mlir_library(CudaTileDialect
   MLIRFunctionInterfaces
   MLIRInferTypeOpInterface
   MLIRSideEffectInterfaces
+  MLIRSupport
   MLIRViewLikeInterface
 )
 
 target_include_directories(CudaTileDialect
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/../../../../compiler/include
 )

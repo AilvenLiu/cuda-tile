@@ -15,12 +15,21 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 
+#include "cuda_tile/Dialect/CudaTile/IR/Remark.h"
+
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h.inc"
 #include <functional>
 #include <optional>
 #include <variant>
 
 namespace mlir::cuda_tile {
+
+using SignatureAttrDictParser = llvm::function_ref<mlir::ParseResult(
+    mlir::OpAsmParser &, mlir::DictionaryAttr &)>;
+using SignatureAttrDictPrinter =
+    llvm::function_ref<void(mlir::OpAsmPrinter &, mlir::DictionaryAttr)>;
+using SignatureArgumentPrinter =
+    llvm::function_ref<void(mlir::OpAsmPrinter &, unsigned)>;
 
 /// Compute the maximum signed value for an integer with the given bitwidth.
 int64_t getMaxSignedValueForBitwidth(int64_t n);
@@ -38,11 +47,21 @@ mlir::ParseResult parseFunctionSignatureWithArguments(
     mlir::OpAsmParser &parser, bool allowVariadic,
     llvm::SmallVectorImpl<mlir::OpAsmParser::Argument> &arguments,
     bool &isVariadic, llvm::SmallVectorImpl<mlir::Type> &resultTypes,
-    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs);
+    llvm::SmallVectorImpl<mlir::DictionaryAttr> &resultAttrs,
+    SignatureAttrDictParser parseAttrDict = {});
 
 /// Print function signature with cuda_tile dialect type support.
 /// This function prints function signatures while omitting the !cuda_tile.
 /// prefix from tile types and using custom type printing for CudaTile types.
+void printFunctionSignatureWithCudaTileTypes(
+    mlir::OpAsmPrinter &printer, mlir::TypeRange inputs,
+    mlir::ArrayAttr argAttrs, mlir::TypeRange results,
+    mlir::ArrayAttr resultAttrs, SignatureArgumentPrinter printArgument,
+    SignatureAttrDictPrinter printAttrDict = {});
+
+/// Print function signature with cuda_tile dialect type support.
+/// This overload extracts argument/result attributes and argument names from a
+/// FunctionOpInterface operation.
 void printFunctionSignatureWithCudaTileTypes(mlir::OpAsmPrinter &printer,
                                              mlir::Operation *op,
                                              mlir::TypeRange inputs,

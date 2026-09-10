@@ -253,7 +253,7 @@ cuda_tile.module @addf_invalid_ftz_modifier {
 
 cuda_tile.module @addf_invalid_rnd_modifier {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf16>, %arg1: !cuda_tile.tile<2x4x8xf16>) {
-        // expected-error @below{{expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'approx'}}
+        // expected-error @below{{expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'approx'}}
         %0 = cuda_tile.addf %arg0, %arg1 rounding<approx> flush_to_zero : !cuda_tile.tile<2x4x8xf16>
     }
 }
@@ -262,7 +262,7 @@ cuda_tile.module @addf_invalid_rnd_modifier {
 
 cuda_tile.module @addf_invalid_rnd_modifier {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf16>, %arg1: !cuda_tile.tile<2x4x8xf16>) {
-        // expected-error @below{{expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'full'}}
+        // expected-error @below{{expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'full'}}
         %0 = cuda_tile.addf %arg0, %arg1 rounding<full> flush_to_zero : !cuda_tile.tile<2x4x8xf16>
     }
 }
@@ -1274,7 +1274,7 @@ cuda_tile.module @mulf_invalid_ftz_modifier {
 
 cuda_tile.module @mulf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'invalid_mode'}}
+        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'invalid_mode'}}
         %0 = cuda_tile.mulf %arg0, %arg1 rounding<invalid_mode> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -1283,7 +1283,7 @@ cuda_tile.module @mulf_invalid_rounding_mode {
 
 cuda_tile.module @mulf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'approx'}}
+        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'approx'}}
         %0 = cuda_tile.mulf %arg0, %arg1 rounding<approx> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -1292,7 +1292,7 @@ cuda_tile.module @mulf_invalid_rounding_mode {
 
 cuda_tile.module @mulf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'full'}}
+        // expected-error @below{{custom op 'cuda_tile.mulf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'full'}}
         %0 = cuda_tile.mulf %arg0, %arg1 rounding<full> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -1423,7 +1423,7 @@ cuda_tile.module @fma_invalid_ftz_modifier_bf16 {
 
 cuda_tile.module @fma_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>, %arg2: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'invalid_mode'}}
+        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'invalid_mode'}}
         %0 = cuda_tile.fma %arg0, %arg1, %arg2 rounding<invalid_mode> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -1432,7 +1432,7 @@ cuda_tile.module @fma_invalid_rounding_mode {
 
 cuda_tile.module @fma_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>, %arg2: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'approx'}}
+        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'approx'}}
         %0 = cuda_tile.fma %arg0, %arg1, %arg2 rounding<approx> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -1441,7 +1441,7 @@ cuda_tile.module @fma_invalid_rounding_mode {
 
 cuda_tile.module @fma_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>, %arg2: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'full'}}
+        // expected-error @below{{custom op 'cuda_tile.fma' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'full'}}
         %0 = cuda_tile.fma %arg0, %arg1, %arg2 rounding<full> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -2008,7 +2008,7 @@ cuda_tile.module @subf_invalid_ftz_modifier {
 
 cuda_tile.module @subf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'invalid_mode'}}
+        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'invalid_mode'}}
         %0 = cuda_tile.subf %arg0, %arg1 rounding<invalid_mode> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -2017,7 +2017,7 @@ cuda_tile.module @subf_invalid_rounding_mode {
 
 cuda_tile.module @subf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'approx'}}
+        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'approx'}}
         %0 = cuda_tile.subf %arg0, %arg1 rounding<approx> : !cuda_tile.tile<2x4x8xf32>
     }
 }
@@ -2026,7 +2026,7 @@ cuda_tile.module @subf_invalid_rounding_mode {
 
 cuda_tile.module @subf_invalid_rounding_mode {
     cuda_tile.testing$func @func(%arg0: !cuda_tile.tile<2x4x8xf32>, %arg1: !cuda_tile.tile<2x4x8xf32>) {
-        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', got: 'full'}}
+        // expected-error @below{{custom op 'cuda_tile.subf' expected rounding mode to be one of: 'nearest_even', 'zero', 'negative_inf', 'positive_inf', 'nearest_away', got: 'full'}}
         %0 = cuda_tile.subf %arg0, %arg1 rounding<full> : !cuda_tile.tile<2x4x8xf32>
     }
 }

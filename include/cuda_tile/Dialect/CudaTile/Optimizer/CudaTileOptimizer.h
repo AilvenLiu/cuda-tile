@@ -63,6 +63,21 @@ struct TileIROptimizerOptions {
 
 void registerTileIROptPasses();
 
+/// Build the CudaTile optimization pipeline into an existing OpPassManager.
+/// Currently all passes are nested under cuda_tile::EntryOp via nestAny().
+///
+/// This pipeline applies optimizations based on the provided optimization
+/// level:
+/// - Level 1+: Canonicalization and CSE
+/// - Level 2+: Loop Invariant Code Motion
+/// - Level 3+: Loop splitting with additional canonicalization
+///
+/// \param pm The pass manager to populate
+///           (expected OpPassManager on cuda_tile::ModuleOp)
+/// \param opts Optimization options controlling which passes to include
+void buildCudaTilePipeline(OpPassManager &pm,
+                           const TileIROptimizerOptions &opts);
+
 LogicalResult optimizeTileIRModule(ModuleOp module,
                                    const TileIROptimizerOptions &opts,
                                    bool verbose = false);

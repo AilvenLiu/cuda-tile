@@ -42,6 +42,10 @@ struct BytecodeTypeParameter {
   enum class Kind {
     GenericType,
     SpecificType,
+    TypeAttr,
+    NestedAttr,
+    PolymorphicNestedAttr,
+    AttributeArray,
     Int64Array,
     Int32Array,
     DenseI32Array,

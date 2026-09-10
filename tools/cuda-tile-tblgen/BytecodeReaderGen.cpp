@@ -1,4 +1,4 @@
-//===- BytecodeReaderGen.cpp ------------------------------------*- C++ -*-===//
+//===- BytecodeReaderGen.cpp - CUDA Tile Bytecode Reader Gen ----*- C++ -*-===//
 //
 // Part of the CUDA Tile IR project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -288,7 +288,7 @@ generateOperandDeserialization(const Operator &opDef, raw_ostream &os,
         size_t operandBitIndex = bitAssignments.lookup(odsOperandName);
        // Public operations: check operand version compatibility.
           auto [majorStr, minorStr] = extractVersionFromOperand(i, opDef);
-          std::string version = majorStr + "." + minorStr;
+          std::string version = (Twine(majorStr) + "." + minorStr).str();
           std::string opVersion = extractVersionFromOperation(opDef);
 
           if (version == opVersion) {
@@ -408,7 +408,8 @@ generateAttributeDeserialization(const Operator &op, raw_ostream &os,
       // For public operations, add version checking.
       auto [majorStr, minorStr] = extractVersionFromAttribute(namedAttr, op);
       auto defaultValue = extractDefaultValue(namedAttr);
-      std::string version = majorStr + "." + minorStr;
+      auto sameOperandRank = extractSameOperandRankName(namedAttr, op);
+      std::string version = (Twine(majorStr) + "." + minorStr).str();
 
       os << llvm::formatv(R"(
   auto requiredVersionFor_{0} = BytecodeVersion::fromVersion({1}, {2}, 0);
@@ -454,6 +455,13 @@ generateAttributeDeserialization(const Operator &op, raw_ostream &os,
                           "BytecodeReaderGen.cpp for operation '" +
                           op.getOperationName() + "'");
         }
+      } else if (sameOperandRank.has_value()) {
+        // Required attribute introduced after the op, decorated with
+        // RequireSameOperandRank: leave the variable null for now. After
+        // operand deserialization, generateSameOperandRankFixups synthesizes
+        // the attribute from the matching operand's rank and appends it to
+        // the attributes vector.
+        os << "    " << varName << " = nullptr;\n";
       } else {
         // No default value available.
         std::string opVersion = extractVersionFromOperation(op);
@@ -633,6 +641,102 @@ static void generateResultTypeDeserialization(const Operator &op,
   generateVersionAwareResultDeserialization(op, os);
 }
 
+/// Generates per-operand-rank attribute fixups. For each attribute decorated
+/// with `RequireSameOperandRank`, when reading bytecode older than the
+/// attribute's `sinceVersion`, synthesize an all-`false` DenseBoolArrayAttr
+/// sized to the rank of the referenced operand (the
+/// `currentSegmentLengthOds_<i>` variable produced by
+/// `generateOperandDeserialization`).
+static void
+generateSameOperandRankFixups(const Operator &op, raw_ostream &os,
+                              const StringMap<size_t> & /*bitAssignments*/) {
+  bool opHasAttrSizedOperandSegments =
+      op.getTrait("::mlir::OpTrait::AttrSizedOperandSegments") != nullptr;
+  if (!opHasAttrSizedOperandSegments) {
+    // Fixup codegen needs AttrSizedOperandSegments. Without it, walk the
+    // attributes only to reject any RequireSameOperandRank misapplication;
+    // otherwise the decorator would be silently dropped.
+    for (const NamedAttribute &namedAttr : op.getAttributes()) {
+      if (extractSameOperandRankName(namedAttr, op).has_value()) {
+        PrintFatalError(
+            op.getLoc(),
+            "RequireSameOperandRank on attribute '" + namedAttr.name.str() +
+                "' of operation '" + op.getOperationName() +
+                "' requires the operation to carry the "
+                "AttrSizedOperandSegments trait (the fixup codegen reads "
+                "the matching operand's segment length from "
+                "currentSegmentLengthOds_<i>, which only exists when the "
+                "operand-segment-sizes attribute is present)");
+      }
+    }
+    return;
+  }
+  for (const NamedAttribute &namedAttr : op.getAttributes()) {
+    auto fixupOperand = extractSameOperandRankName(namedAttr, op);
+    if (!fixupOperand.has_value()) {
+      continue;
+    }
+    StringRef attrName = namedAttr.name;
+    StringRef baseCppTypeStr = namedAttr.attr.getStorageType();
+    if (!baseCppTypeStr.contains("DenseBoolArrayAttr")) {
+      PrintFatalError(op.getLoc(),
+                      "RequireSameOperandRank is currently only supported for "
+                      "DenseBoolArrayAttr; attribute '" +
+                          attrName.str() + "' on '" + op.getOperationName() +
+                          "' has unsupported storage type '" +
+                          baseCppTypeStr.str() + "'");
+    }
+    // Locate the index of the referenced operand.
+    int operandIndex = -1;
+    for (unsigned i = 0, e = op.getNumOperands(); i != e; ++i) {
+      if (op.getOperand(i).name == *fixupOperand) {
+        operandIndex = static_cast<int>(i);
+        break;
+      }
+    }
+    if (operandIndex < 0) {
+      PrintFatalError(op.getLoc(), "RequireSameOperandRank on attribute '" +
+                                       attrName.str() + "' of operation '" +
+                                       op.getOperationName() +
+                                       "' references unknown operand '" +
+                                       *fixupOperand + "'");
+    }
+    // Only meaningful for variadic operands.
+    const auto &referencedOperand = op.getOperand(operandIndex);
+    bool isVariadic =
+        referencedOperand.isVariableLength() && !referencedOperand.isOptional();
+    if (!isVariadic) {
+      PrintFatalError(op.getLoc(),
+                      "RequireSameOperandRank on attribute '" + attrName.str() +
+                          "' of operation '" + op.getOperationName() +
+                          "' references operand '" + *fixupOperand +
+                          "' which is not variadic; the synthesized default "
+                          "would have a fixed length unrelated to operand "
+                          "rank");
+    }
+
+    auto [majorStr, minorStr] = extractVersionFromAttribute(namedAttr, op);
+    std::string varName = "parsed_" + attrName.str();
+    // Synthesize the fixup when reading older bytecode that lacks the
+    // attribute. The variable was set to nullptr by the attribute
+    // deserialization step in that case.
+    os << llvm::formatv(R"(
+  // --- Same-Operand-Rank Fixup for attribute '{0}' (sinceVersion = {1}.{2}) ---
+  {{
+    auto requiredVersionForFixup_{0} = BytecodeVersion::fromVersion({1}, {2}, 0);
+    assert(requiredVersionForFixup_{0} && "TableGen should guarantee valid versions");
+    if (bytecodeVersion < *requiredVersionForFixup_{0}) {{
+      ::llvm::SmallVector<bool> defaultVec(
+          static_cast<size_t>(currentSegmentLengthOds_{3}), false);
+      {4} = ::mlir::DenseBoolArrayAttr::get(&context, defaultVec);
+      attributes.emplace_back(innerBuilder.getStringAttr("{0}"), {4});
+    }
+  }
+)",
+                        attrName, majorStr, minorStr, operandIndex, varName);
+  }
+}
+
 /// Generates C++ code within the 'parse<OpName>' function to deserialize the
 /// regions of the given operation, if it has any.
 static void generateRegionDeserialization(const Operator &op, raw_ostream &os) {
@@ -665,6 +769,7 @@ static void generateOpReader(const Operator &op, raw_ostream &os) {
   generateFlagsFieldDeserialization(op, os, bitAssignments, minOptionalVersion);
   generateAttributeDeserialization(op, os, bitAssignments);
   generateOperandDeserialization(op, os, bitAssignments);
+  generateSameOperandRankFixups(op, os, bitAssignments);
   generateRegionDeserialization(op, os);
   generateOperationDeserialization(op, os);
   os << "  return success();\n"

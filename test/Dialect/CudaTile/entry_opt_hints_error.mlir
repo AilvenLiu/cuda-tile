@@ -32,7 +32,7 @@ cuda_tile.module @sm_not_int_param {
 // -----
 
 cuda_tile.module @sm_not_power_of_2 {
-  // expected-warning @below{{expected power-of-two ≤ 16 for sm_100.num_cta_in_cga}}
+  // expected-warning @below{{power-of-2 expected for sm_100.num_cta_in_cga}}
   // expected-error @below{{Optimization hints verification failed}}
   entry @test_optimization_hints(%arg0: !cuda_tile.tile<ptr<f32>>) optimization_hints=<sm_100={num_cta_in_cga=7}> {
     return
@@ -42,7 +42,7 @@ cuda_tile.module @sm_not_power_of_2 {
 // -----
 
 cuda_tile.module @occupancy_invalid {
-  // expected-warning @below{{integer value in the range [1, 32] is expected for sm_100.occupancy}}
+  // expected-warning @below{{value 64 clamped to 32 for sm_100.occupancy}}
   // expected-error @below{{Optimization hints verification failed}}
   entry @test_optimization_hints(%arg0: !cuda_tile.tile<ptr<f32>>) optimization_hints=<sm_100={occupancy=64}> {
     return
@@ -62,7 +62,7 @@ cuda_tile.module @warps_not_int_param {
 // -----
 
 cuda_tile.module @warps_not_power_of_2 {
-  // expected-warning @below{{expected power-of-two ≤ 32 for sm_100.num_worker_warps_per_cta}}
+  // expected-warning @below{{power-of-2 expected for sm_100.num_worker_warps_per_cta}}
   // expected-error @below{{Optimization hints verification failed}}
   entry @test_optimization_hints(%arg0: !cuda_tile.tile<ptr<f32>>) optimization_hints=<sm_100={num_worker_warps_per_cta=9}> {
     return
@@ -72,7 +72,7 @@ cuda_tile.module @warps_not_power_of_2 {
 // -----
 
 cuda_tile.module @warps_out_of_range {
-  // expected-warning @below{{expected power-of-two ≤ 32 for sm_100.num_worker_warps_per_cta}}
+  // expected-warning @below{{value 64 clamped to 8 for sm_100.num_worker_warps_per_cta}}
   // expected-error @below{{Optimization hints verification failed}}
   entry @test_optimization_hints(%arg0: !cuda_tile.tile<ptr<f32>>) optimization_hints=<sm_100={num_worker_warps_per_cta=64}> {
     return

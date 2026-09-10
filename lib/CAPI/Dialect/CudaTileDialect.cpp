@@ -52,7 +52,8 @@ MlirTypeID mlirCudaTilePointerTypeGetTypeID(void) {
 }
 
 MlirType mlirCudaTilePointerTypeGet(MlirContext ctx, MlirType pointeeType) {
-  return wrap(PointerType::get(unwrap(ctx), unwrap(pointeeType)));
+  (void)ctx;
+  return wrap(PointerType::get(unwrap(pointeeType)));
 }
 
 MlirType mlirCudaTilePointerTypeGetPointeeType(MlirType type) {
@@ -594,19 +595,22 @@ MlirAttribute mlirCudaTileOptimizationHintsAttrGetEntryOpHint(
   IntegerType i32 = IntegerType::get(context, 32);
 
   if (numCta != 0) {
-    innerAttrs.emplace_back(StringAttr::get(context, "num_cta_in_cga"),
-                            IntegerAttr::get(i32, numCta));
+    innerAttrs.emplace_back(
+        StringAttr::get(context, stringifyHintKey(HintKey::NumCTAInCGA)),
+        IntegerAttr::get(i32, numCta));
   }
 
   if (numWorkerWarps != 0) {
     innerAttrs.emplace_back(
-        StringAttr::get(context, "num_worker_warps_per_cta"),
+        StringAttr::get(context,
+                        stringifyHintKey(HintKey::NumWorkerWarpsPerCTA)),
         IntegerAttr::get(i32, numWorkerWarps));
   }
 
   if (occupancy != 0) {
-    innerAttrs.emplace_back(StringAttr::get(context, "occupancy"),
-                            IntegerAttr::get(i32, occupancy));
+    innerAttrs.emplace_back(
+        StringAttr::get(context, stringifyHintKey(HintKey::Occupancy)),
+        IntegerAttr::get(i32, occupancy));
   }
 
   auto innerDict = DictionaryAttr::get(context, innerAttrs);
@@ -629,13 +633,15 @@ MlirAttribute mlirCudaTileOptimizationHintsAttrGetLoadStoreOpHint(
 
   // Only emit allow_tma if explicitly specified (not -1)
   if (allowTma != -1) {
-    innerAttrs.emplace_back(StringAttr::get(context, "allow_tma"),
-                            BoolAttr::get(context, allowTma != 0));
+    innerAttrs.emplace_back(
+        StringAttr::get(context, stringifyHintKey(HintKey::AllowTMA)),
+        BoolAttr::get(context, allowTma != 0));
   }
 
   if (latency != 0) {
-    innerAttrs.emplace_back(StringAttr::get(context, "latency"),
-                            IntegerAttr::get(i32, latency));
+    innerAttrs.emplace_back(
+        StringAttr::get(context, stringifyHintKey(HintKey::Latency)),
+        IntegerAttr::get(i32, latency));
   }
 
   auto innerDict = DictionaryAttr::get(context, innerAttrs);

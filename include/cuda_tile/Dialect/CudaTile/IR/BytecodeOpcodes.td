@@ -55,6 +55,7 @@ def TestingOpcodeRange : OpcodeRange<0x3000, 0xFFFFFFFF>;
 def : SupportedVersion<13, 1>;
 def : SupportedVersion<13, 2>;
 def : SupportedVersion<13, 3>;
+def : SupportedVersion<13, 4>;
 
 // Testing versions - only available when TILE_IR_INCLUDE_TESTS is defined
 #ifdef TILE_IR_INCLUDE_TESTS
@@ -134,7 +135,7 @@ def : PublicOpcode<CudaTile_NegIOp, 0x50>;
 def : PublicOpcode<CudaTile_OffsetOp, 0x51>;
 def : PublicOpcode<CudaTile_OrIOp, 0x52>;
 def : PublicOpcode<CudaTile_PermuteOp, 0x53>;
-def : PublicOpcode<CudaTile_PowOp, 0x54>;
+def : PublicOpcode<CudaTile_FPowFOp, 0x54>;
 def : PublicOpcode<CudaTile_PrintTkoOp, 0x55>;
 def : PublicOpcode<CudaTile_PtrToIntOp, 0x56>;
 def : PublicOpcode<CudaTile_PtrToPtrOp, 0x57>;
@@ -168,6 +169,11 @@ def : PublicOpcode<CudaTile_MmaFScaledOp, 0x72>;
 def : PublicOpcode<CudaTile_MakeGatherScatterViewOp, 0x73>;
 def : PublicOpcode<CudaTile_MakeStridedViewOp, 0x74>;
 def : PublicOpcode<CudaTile_AtomicRedViewTkoOp, 0x75>;
+def : PublicOpcode<CudaTile_InsertOp, 0x76>;
+def : PublicOpcode<CudaTile_GdcLaunchDependentsTkoOp, 0x77>;
+def : PublicOpcode<CudaTile_GdcWaitTkoOp, 0x78>;
+def : PublicOpcode<CudaTile_FPowIOp, 0x79>;
+def : PublicOpcode<CudaTile_MemoryFenceAliasTkoOp, 0x7A>;
 
 #ifdef TILE_IR_INCLUDE_TESTS
 // TESTING OPERATIONS (0x3000+) - Only available when TILE_IR_INCLUDE_TESTS is defined.

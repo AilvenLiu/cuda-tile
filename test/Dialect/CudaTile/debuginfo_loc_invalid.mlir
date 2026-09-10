@@ -738,7 +738,7 @@ cuda_tile.module @kernels {
 // CHECK: invalid operation debug info scope
 // CHECK: Global variables must not have scope
 cuda_tile.module @kernels {
-  "some.op"() : () -> () loc("global_op"(#di_loc_func))
+  cuda_tile.global @glob <i32: [42]> : !cuda_tile.tile<1xi32> loc("global_op"(#di_loc_func))
 }
 
 // -----
@@ -755,7 +755,7 @@ cuda_tile.module @kernels {
 // CHECK: invalid operation debug info scope
 // CHECK: Global variables must not have scope
 cuda_tile.module @kernels {
-  "some.op"() : () -> () loc(fused[#loc_func, #di_loc_func])
+  cuda_tile.global @glob <i32: [42]> : !cuda_tile.tile<1xi32> loc(fused[#loc_func, #di_loc_func])
 }
 
 // -----
@@ -772,7 +772,7 @@ cuda_tile.module @kernels {
 // CHECK: invalid operation debug info scope
 // CHECK: Global variables must not have scope
 cuda_tile.module @kernels {
-  "some.op"() : () -> () loc(callsite(#loc_func at #di_loc_func))
+  cuda_tile.global @glob <i32: [42]> : !cuda_tile.tile<1xi32> loc(callsite(#loc_func at #di_loc_func))
 }
 
 

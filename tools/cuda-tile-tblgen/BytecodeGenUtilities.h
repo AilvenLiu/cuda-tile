@@ -27,15 +27,42 @@ namespace mlir {
 namespace tblgen {
 
 /// Parse version string into major/minor components.
-std::pair<std::string, std::string> parseVersion(llvm::StringRef version);
+/// Returns StringRefs pointing into the input string (or "0" for missing
+/// minor).
+std::pair<StringRef, StringRef> parseVersion(StringRef version);
+
+/// Check if a parsed version represents the minimum supported version (13.1).
+inline bool isMinimumVersion(StringRef majorStr, StringRef minorStr) {
+  return majorStr == "13" && minorStr == "1";
+}
+
+/// Check if version A is greater than version B.
+/// Returns false if either version string is empty or invalid.
+/// Version components are numeric strings like "13", "2" (not "13.2").
+inline bool isVersionGreater(StringRef majorA, StringRef minorA,
+                             StringRef majorB, StringRef minorB) {
+  unsigned majA, minA, majB, minB;
+  // getAsInteger returns true on failure (non-numeric or overflow).
+  if (majorA.getAsInteger(10, majA) || minorA.getAsInteger(10, minA) ||
+      majorB.getAsInteger(10, majB) || minorB.getAsInteger(10, minB)) {
+    return false;
+  }
+  return majA > majB || (majA == majB && minA > minB);
+}
 
 /// Extract version information from an attribute's TableGen metadata.
-std::pair<std::string, std::string>
+std::pair<StringRef, StringRef>
 extractVersionFromAttribute(const NamedAttribute &namedAttr,
                             const Operator &op);
 
 /// Extract the default value from an attribute if it has one.
 std::optional<std::string> extractDefaultValue(const NamedAttribute &namedAttr);
+
+/// If the given attribute is decorated with `RequireSameOperandRank`,
+/// return the name of the operand whose rank should be used to size the
+/// fixup value. Returns std::nullopt otherwise.
+std::optional<std::string>
+extractSameOperandRankName(const NamedAttribute &namedAttr, const Operator &op);
 
 /// Extract the version string from an operation's metadata.
 std::string extractVersionFromOperation(const Operator &op);
@@ -48,12 +75,12 @@ std::pair<llvm::StringMap<size_t>,
 getVersionOrderedBitAssignments(const Operator &op);
 
 /// Extract version information from an operand's TableGen metadata.
-std::pair<std::string, std::string>
-extractVersionFromOperand(unsigned operandIndex, const Operator &op);
+std::pair<StringRef, StringRef> extractVersionFromOperand(unsigned operandIndex,
+                                                          const Operator &op);
 
 /// Extract version information from a result's TableGen metadata.
-std::pair<std::string, std::string>
-extractVersionFromResult(unsigned resultIndex, const Operator &op);
+std::pair<StringRef, StringRef> extractVersionFromResult(unsigned resultIndex,
+                                                         const Operator &op);
 
 /// Shared structure to capture version info for result
 /// serialization/deserialization.

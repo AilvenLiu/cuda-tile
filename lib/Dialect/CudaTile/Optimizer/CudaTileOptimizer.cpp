@@ -38,42 +38,14 @@ using namespace mlir::cuda_tile;
 namespace {
 
 /// Parse optimization pipeline from text
-static LogicalResult parseTextInto(llvm::StringRef text, OpPassManager &PM,
-                                   MLIRContext *context) {
+static LogicalResult parseTextInto(llvm::StringRef text, PassManager &pm) {
   if (text.empty())
     return success();
-  // Parsing textual pipeline into an existing (nested) OpPassManager.
-  // NOTE: because opPM is already nested for cuda_tile::EntryOp, the text
-  // should NOT include an op anchor.
-  if (failed(parsePassPipeline(text, PM))) {
-    emitError(UnknownLoc::get(context)) << "Failed to parse pipeline: " << text;
+  // Parsing textual pipeline into an existing PassManager.
+  if (failed(parsePassPipeline(text, pm))) {
+    emitError(UnknownLoc::get(pm.getContext()))
+        << "Failed to parse pipeline: " << text;
     return failure();
-  }
-  return success();
-}
-
-/// Build default optimization pipeline
-static LogicalResult
-buildDefaultCudaTilePipeline(OpPassManager &nested,
-                             const TileIROptimizerOptions &opts) {
-  // 1) Optional FMA fusion
-  if (opts.enableFuseFMA)
-    nested.addPass(createFuseFMAPass());
-
-  if (opts.optLevel >= 1) {
-    // 2) Canonicalize + CSE before further opts
-    nested.addPass(createCanonicalizerPass());
-    nested.addPass(createCSEPass());
-
-    if (opts.optLevel >= 2) {
-      nested.addPass(createLoopInvariantCodeMotionPass());
-
-      if (opts.optLevel >= 3) {
-        // 3) loop split, followed by another canonicalization sweep.
-        nested.addPass(createLoopSplitPass({opts.loopSplitThreshold}));
-        nested.addPass(createCanonicalizerPass());
-      }
-    }
   }
   return success();
 }
@@ -82,19 +54,17 @@ buildDefaultCudaTilePipeline(OpPassManager &nested,
 static LogicalResult
 buildCudaTileOptimizationPipeline(PassManager &pm,
                                   const TileIROptimizerOptions &opts) {
-  // Pipeline is nested under cuda_tile::EntryOp.
-  auto &nested = pm.nestAny();
 
   // Add additional passes before default pipeline
-  if (failed(parseTextInto(opts.pipelinePreText, nested, pm.getContext())))
+  if (failed(parseTextInto(opts.pipelinePreText, pm))) {
     return failure();
+  }
 
   // Add default pipeline
-  if (failed(buildDefaultCudaTilePipeline(nested, opts)))
-    return failure();
+  buildCudaTilePipeline(pm, opts);
 
   // Add additional passes after default pipeline
-  return parseTextInto(opts.pipelinePostText, nested, pm.getContext());
+  return parseTextInto(opts.pipelinePostText, pm);
 }
 
 //===----------------------------------------------------------------------===//
@@ -283,6 +253,44 @@ static LogicalResult emitOutputs(TileIROptimizerConfig &cfg,
 } // namespace
 
 namespace mlir::cuda_tile {
+
+/// Builds the default CUDA Tile optimization pipeline.
+///
+/// This pipeline applies optimizations based on the provided optimization
+/// level:
+/// - Level 1+: Canonicalization and CSE
+/// - Level 2+: Loop Invariant Code Motion
+/// - Level 3+: Loop splitting with additional canonicalization
+///
+/// \param pm The pass manager to populate
+/// \param opts Optimization options controlling which passes to include
+void buildCudaTilePipeline(OpPassManager &pm,
+                           const TileIROptimizerOptions &opts) {
+  // Pipeline is nested under cuda_tile::EntryOp.
+  auto &nested = pm.nestAny();
+
+  // 1) Optional FMA fusion
+  if (opts.enableFuseFMA) {
+    nested.addPass(createFuseFMAPass());
+  }
+
+  if (opts.optLevel >= 1) {
+    // 2) Canonicalize + CSE before further opts
+    nested.addPass(createCanonicalizerPass());
+    nested.addPass(createCSEPass());
+
+    if (opts.optLevel >= 2) {
+      // 3) Loop Invariant Code Motion
+      nested.addPass(createCudaTileLICMPass());
+
+      if (opts.optLevel >= 3) {
+        // 4) loop split, followed by another canonicalization sweep.
+        nested.addPass(createLoopSplitPass({opts.loopSplitThreshold}));
+        nested.addPass(createCanonicalizerPass());
+      }
+    }
+  }
+}
 
 void registerTileIROptPasses() {
   registerCudaTilePasses();

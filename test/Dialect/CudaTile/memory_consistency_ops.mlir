@@ -36,6 +36,14 @@ testing$func @join_tokens_three_tokens() -> !cuda_tile.token {
   return %3 : token
 }
 
+// CHECK-LABEL: @memory_fence_alias_tko
+testing$func @memory_fence_alias_tko(%token: !cuda_tile.token) -> !cuda_tile.token {
+  // CHECK: %[[FENCE:.*]] = memory_fence_alias_tko %{{.+}}
+  %0 = memory_fence_alias_tko %token
+  // CHECK: return %[[FENCE]] : token
+  return %0 : token
+}
+
 // CHECK-LABEL: load_ptr_tko
 testing$func @load_ptr_tko(%arg0: !cuda_tile.tile<16x32xptr<f32>>) {
   // CHECK: %[[T:.+]] = make_token : token

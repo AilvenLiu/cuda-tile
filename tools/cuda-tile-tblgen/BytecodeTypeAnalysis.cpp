@@ -10,6 +10,7 @@
 #include "BytecodeTypeAnalysis.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/TableGen/Error.h"
 
 using namespace llvm;
@@ -25,28 +26,79 @@ BytecodeTypeParameter::classifyParameter(const AttrOrTypeParameter &param) {
   StringRef cppType = param.getCppType();
   StringRef cppStorageType = param.getCppStorageType();
 
-  // ArrayRefParameter sets cppStorageType to SmallVector.
-  if (cppStorageType.contains("SmallVector<int64_t>"))
-    return Kind::Int64Array;
-  if (cppStorageType.contains("SmallVector<int32_t>"))
-    return Kind::Int32Array;
-  if (cppStorageType.contains("DenseI32ArrayAttr"))
+  // Dense array attrs use the existing dense-array bytecode path rather than
+  // the new nested-attribute array encoding. Only DenseI32ArrayAttr has a
+  // codegen path on the type side today.
+  if (cppType.contains("DenseI32ArrayAttr") ||
+      cppStorageType.contains("DenseI32ArrayAttr")) {
     return Kind::DenseI32Array;
+  }
+  static constexpr StringLiteral kUnsupportedDenseArrays[] = {
+      "DenseI8ArrayAttr",  "DenseI16ArrayAttr", "DenseI64ArrayAttr",
+      "DenseF32ArrayAttr", "DenseF64ArrayAttr", "DenseBoolArrayAttr",
+  };
+  for (StringRef name : kUnsupportedDenseArrays) {
+    if (cppType.contains(name) || cppStorageType.contains(name)) {
+      PrintFatalError("Type parameter uses unsupported dense-array attr '" +
+                      name.str() +
+                      "'. Extend BytecodeTypeAnalysis and the codegen to add "
+                      "support for new dense-array element types.");
+    }
+  }
+
+  // Container checks must precede the scalar TypeAttr check below: a param
+  // like `ArrayRef<TypeAttr>` must be classified as AttributeArray, not as
+  // a single TypeAttr.
+  bool isContainer =
+      cppType.contains("ArrayAttr") || cppStorageType.contains("ArrayAttr") ||
+      (cppType.contains("ArrayRef") &&
+       (cppType.contains("Attribute") || cppType.contains("Attr")));
+  if (isContainer) {
+    return Kind::AttributeArray;
+  }
+
+  if (cppType.contains("TypeAttr") || cppStorageType.contains("TypeAttr")) {
+    return Kind::TypeAttr;
+  }
+
+  // Optional attribute parameters use the dedicated optional-enum bitfield
+  // encoding.
+  if (param.isOptional() && cppType.contains("Attr") &&
+      !cppType.contains("Attribute")) {
+    return Kind::OptionalEnum;
+  }
+
+  if (const auto *defInit = dyn_cast_if_present<DefInit>(param.getDef())) {
+    if (defInit->getDef()->isSubClassOf("CudaTileAttrInterfaceParam")) {
+      return Kind::PolymorphicNestedAttr;
+    }
+  }
+  if (cppType.contains("Attribute") || cppStorageType.contains("Attribute") ||
+      cppType.ends_with("Attr") || cppStorageType.ends_with("Attr") ||
+      cppType.contains("::Attr") || cppStorageType.contains("::Attr")) {
+    return Kind::NestedAttr;
+  }
+
+  // ArrayRefParameter sets cppStorageType to SmallVector.
+  if (cppStorageType.contains("SmallVector<int64_t>")) {
+    return Kind::Int64Array;
+  }
+  if (cppStorageType.contains("SmallVector<int32_t>")) {
+    return Kind::Int32Array;
+  }
 
   // Check for uint32_t scalar
-  if (cppType == "uint32_t" || cppStorageType == "uint32_t")
+  if (cppType == "uint32_t" || cppStorageType == "uint32_t") {
     return Kind::UInt32Scalar;
+  }
 
   // Check for Type parameters.
   if (cppType.contains("Type")) {
-    if (cppType.contains("cuda_tile::"))
+    if (cppType.contains("cuda_tile::")) {
       return Kind::SpecificType;
+    }
     return Kind::GenericType;
   }
-
-  // Check for optional enum attributes.
-  if (param.isOptional() && cppType.contains("Attr"))
-    return Kind::OptionalEnum;
 
   // Unsupported parameter type.
   PrintFatalError("Unsupported parameter type for bytecode generation: " +
@@ -59,31 +111,35 @@ BytecodeTypeParameter::BytecodeTypeParameter(const AttrOrTypeParameter &param)
       cppStorageType(param.getCppStorageType().str()),
       isOptional(param.isOptional()), kind(classifyParameter(param)) {
 
-  // Extract version from wrapped parameters (CudaTileTypeParam adds sinceVersion).
-  // Use getValue() to check if field exists before accessing - raw parameters
-  // like ArrayRefParameter don't have this field in their class hierarchy.
+  // Extract version from wrapped parameters (CudaTileTypeParam adds
+  // sinceVersion). Use getValue() to check if field exists before accessing -
+  // raw parameters like ArrayRefParameter don't have this field in their class
+  // hierarchy.
   if (const auto *defInit = dyn_cast_if_present<DefInit>(param.getDef())) {
     const Record *paramRecord = defInit->getDef();
     if (paramRecord->getValue("sinceVersion") &&
-        !paramRecord->isValueUnset("sinceVersion"))
+        !paramRecord->isValueUnset("sinceVersion")) {
       sinceVersion = paramRecord->getValueAsString("sinceVersion").str();
+    }
   }
 
   // Extract default value if present.
-  if (auto defValue = param.getDefaultValue())
+  if (auto defValue = param.getDefaultValue()) {
     defaultValue = defValue->str();
+  }
 
   // Extract enum type name for OptionalEnum kind.
   if (kind == Kind::OptionalEnum) {
     auto split = StringRef(cppType).rsplit("::");
-    if (split.second.empty() || !split.second.ends_with("Attr"))
+    if (split.second.empty() || !split.second.ends_with("Attr")) {
       PrintFatalError("OptionalEnum parameter type must end with 'Attr': " +
                       cppType);
+    }
     enumTypeName = split.second.drop_back(4).str();
   }
 
   // Compute if this parameter is optional with null default (Type, Enum, etc.).
-  usesOptionalTypeFlags = isOptional && (defaultValue == cppType + "()");
+  usesOptionalTypeFlags = isOptional && (defaultValue == cppStorageType + "()");
 }
 
 //===----------------------------------------------------------------------===//
@@ -97,36 +153,40 @@ CudaTileType::CudaTileType(const AttrOrTypeDef &typeDef, unsigned tagValue,
                         "::" + typeDef.getCppClassName().str()),
       typeTagValue(tagValue), sinceVersion(version.str()),
       needsReverseOrder(typeDef.getCppClassName() == "TileType") {
+  const Record *typeRecord = typeDef.getDef();
 
   // Analyze and validate all parameters.
   for (const auto &attrParam : typeDef.getParameters()) {
     BytecodeTypeParameter param(attrParam);
 
     // Validate: All parameters must have version information.
-    if (!skipVersionCheck && param.sinceVersion.empty())
+    if (!skipVersionCheck && param.sinceVersion.empty()) {
       PrintFatalError(
           "Parameter '" + param.name + "' in type '" + typeName +
           "' must be wrapped with CudaTileTypeParam or "
           "CudaTileConstrainedTypeParam to have version information.");
+    }
 
     // Detect optional Type parameters with null defaults for flag-based.
     if (param.usesOptionalTypeFlags) {
       hasOptionalTypeParams = true;
       if (!skipVersionCheck &&
           (firstOptionalTypeParamVersion.empty() ||
-           param.sinceVersion < firstOptionalTypeParamVersion))
+           param.sinceVersion < firstOptionalTypeParamVersion)) {
         firstOptionalTypeParamVersion = param.sinceVersion;
+      }
     }
 
     // Validate: Non-optional parameters introduced after type need defaults.
     if (!skipVersionCheck && !param.isOptional &&
         param.sinceVersion != sinceVersion) {
-      if (param.defaultValue.empty())
+      if (param.defaultValue.empty()) {
         PrintFatalError(
             "Parameter '" + param.name + "' in type '" + typeName +
             "' was introduced in version " + param.sinceVersion +
             " after the type (version " + sinceVersion +
             "). It must have a default value for backward compatibility.");
+      }
     }
 
     parameters.push_back(std::move(param));
@@ -155,15 +215,17 @@ static void validateAllTypesHaveBytecodeSupport(
     StringRef typeName = entry.getKey();
     const Record *typeRecord = entry.getValue();
 
-    if (typeRecord->getValueAsString("sinceVersion").empty())
+    if (typeRecord->getValueAsString("sinceVersion").empty()) {
       PrintFatalError(typeRecord->getLoc(), "CudaTileTypeDef '" +
                                                 typeName.str() +
                                                 "' is missing 'sinceVersion'");
+    }
 
-    if (!typesWithTags.count(typeName))
+    if (!typesWithTags.count(typeName)) {
       PrintFatalError(typeRecord->getLoc(),
                       "CudaTileTypeDef '" + typeName.str() +
                           "' is missing BytecodeTypeTag assignment");
+    }
   }
 }
 
@@ -171,12 +233,28 @@ FailureOr<BytecodeTypeStructure>
 mlir::tblgen::analyzeBytecodeTypes(const RecordKeeper &records) {
   BytecodeTypeStructure structure;
 
+  // Build the index of every CudaTile enum-attribute wrapper's qualified C++
+  // class name. CudaTileEnumAttr is the only wrapper class used for CudaTile
+  // enum attribute wrappers (see Dialect.td); all enum infos are wrapped
+  // through it. Both qualified forms ("ns::Foo" and "::ns::Foo") are indexed
+  // so lookups don't depend on how OptionalParameter spells the name.
+  llvm::StringSet<> enumAttrCppTypes;
+  for (const Record *r : records.getAllDerivedDefinitions("CudaTileEnumAttr")) {
+    AttrOrTypeDef def(r);
+    std::string qualified =
+        (def.getDialect().getCppNamespace() + "::" + def.getCppClassName())
+            .str();
+    enumAttrCppTypes.insert(qualified);
+    enumAttrCppTypes.insert("::" + qualified);
+  }
+
   // Build map of CudaTileTypeDef for matching.
   StringMap<const Record *> cudaTileTypeDefRecords;
   for (const Record *typeRecord :
-       records.getAllDerivedDefinitions("CudaTileTypeDef"))
+       records.getAllDerivedDefinitions("CudaTileTypeDef")) {
     cudaTileTypeDefRecords[AttrOrTypeDef(typeRecord).getCppClassName()] =
         typeRecord;
+  }
 
   // Build map of builtin type versions, stripping "CudaTile_" prefix.
   // Maps enum name (e.g., "Int32") to version string for efficient lookup.
@@ -185,15 +263,17 @@ mlir::tblgen::analyzeBytecodeTypes(const RecordKeeper &records) {
        records.getAllDerivedDefinitions("CudaTileTypeAlias")) {
     StringRef aliasName = aliasRecord->getName();
     StringRef version = aliasRecord->getValueAsString("sinceVersion");
-    if (aliasName.starts_with("CudaTile_"))
+    if (aliasName.starts_with("CudaTile_")) {
       builtinTypeVersions[aliasName.drop_front(9)] = version;
+    }
   }
 
   // Helper to lookup version from tag enum name.
   auto lookupBuiltinVersion = [&](StringRef enumName) -> StringRef {
     StringRef version = builtinTypeVersions.lookup(enumName);
-    if (version.empty())
+    if (version.empty()) {
       PrintFatalError("No version found for builtin type: " + enumName.str());
+    }
     return version;
   };
 
@@ -205,6 +285,13 @@ mlir::tblgen::analyzeBytecodeTypes(const RecordKeeper &records) {
        records.getAllDerivedDefinitions("BytecodeTypeTag")) {
     StringRef enumName = record->getValueAsString("cppTypeName");
     unsigned tagValue = record->getValueAsInt("typeTagValue");
+
+    // Validate the tag name is non-empty.
+    if (enumName.empty()) {
+      PrintFatalError(record->getLoc(), "BytecodeTypeTag '" +
+                                            record->getName().str() +
+                                            "' has empty 'cppTypeName'");
+    }
 
     // Add to enum.
     structure.allTypeTags.emplace_back(enumName.str(), tagValue);
@@ -227,11 +314,35 @@ mlir::tblgen::analyzeBytecodeTypes(const RecordKeeper &records) {
             typeDef.getDef()->getValueAsString("sinceVersion");
         structure.cudaTileTypes.emplace_back(typeDef, tagValue, typeVersion);
       }
+    } else {
+      PrintFatalError(record->getLoc(),
+                      "BytecodeTypeTag '" + enumName.str() +
+                          "' must subclass IntegerTypeTag, FloatTypeTag, or "
+                          "CudaTileTypeTag");
     }
   }
 
   // Validate all CudaTileTypeDef types have bytecode support.
   validateAllTypesHaveBytecodeSupport(cudaTileTypeDefRecords, typesWithTags);
+
+  // Validate every OptionalEnum-classified parameter is actually a
+  // CudaTileEnumAttr-derived enum-attribute wrapper.
+  for (const CudaTileType &type : structure.cudaTileTypes) {
+    for (const BytecodeTypeParameter &p : type.parameters) {
+      if (p.kind != BytecodeTypeParameter::Kind::OptionalEnum) {
+        continue;
+      }
+      if (!enumAttrCppTypes.contains(p.cppType)) {
+        PrintFatalError(
+            "Optional attribute parameter '" + p.name + "' in type '" +
+            type.typeName + "' has cppType '" + p.cppType +
+            "' which is not a CudaTileEnumAttr-derived enum-attribute "
+            "wrapper. Optional attribute params in CudaTile types are only "
+            "supported for enum attributes today; either drop optionality, "
+            "or extend BytecodeTypeAnalysis with a new optional-attr Kind.");
+      }
+    }
+  }
 
   return structure;
 }

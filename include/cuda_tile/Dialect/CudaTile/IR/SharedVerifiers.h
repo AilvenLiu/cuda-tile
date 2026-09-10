@@ -11,7 +11,10 @@
 #define CUDA_TILE_DIALECT_CUDATILE_IR_SHAREDVERIFIERS_H
 
 #include "mlir/IR/BuiltinTypeInterfaces.h"
+#include "mlir/IR/Operation.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LogicalResult.h"
 
 #include "llvm/Support/LogicalResult.h"
@@ -28,36 +31,64 @@ namespace cuda_tile {
 
 template <typename Op>
 static LogicalResult verifyOptHintsCommon(Op op) {
-  auto hints = op->getOptimizationHints();
-  if (hints && !hints->getValue().empty() &&
-      failed(op->getOptimizationHintsAttr().verifyWithOp(op->getOperation(),
-                                                         hints->getValue())))
+  Operation *opInst = op->getOperation();
+  auto hintsAttr =
+      opInst->getAttrOfType<OptimizationHintsAttr>("optimization_hints");
+  if (!hintsAttr || hintsAttr.getValue().empty()) {
+    return success();
+  }
+  if (failed(
+          hintsAttr.verifyWithOp(op->getOperation(), hintsAttr.getValue()))) {
     return op->emitOpError("Optimization hints verification failed");
+  }
+  return success();
+}
+
+static inline LogicalResult verifyViewIndexTileMatch(Operation *op,
+                                                     Value viewVal,
+                                                     ValueRange indexVals,
+                                                     Value tileVal) {
+  auto viewIface = dyn_cast<TileView>(viewVal.getType());
+  if (!viewIface) {
+    return op->emitOpError("expected a tile view type for the view operand");
+  }
+  TypeRange indexTypes = indexVals.getTypes();
+  Type tileType = tileVal.getType();
+
+  if (indexTypes.size() != viewIface.getViewIndexRank()) {
+    return op->emitOpError()
+           << "expected " << viewIface.getViewIndexRank()
+           << " index operands (based on view type), got " << indexTypes.size();
+  }
+
+  if (tileType != viewIface.getViewTileType()) {
+    return op->emitOpError()
+           << "expected tile type to be " << viewIface.getViewTileType()
+           << " (based on view type), got " << tileType;
+  }
+
+  if (failed(viewIface.verifyIndices([&]() { return op->emitOpError(); },
+                                     indexTypes))) {
+    return failure();
+  }
 
   return success();
 }
 
 template <typename LoadStoreOp>
 static LogicalResult verifyViewLoadStoreCommon(LoadStoreOp op) {
-  TileView viewType = op->getView().getType();
-  Operation::operand_range::type_range indexTypes = op->getIndex().getTypes();
-  Type tileType = op->getTile().getType();
-
-  if (indexTypes.size() != viewType.getViewIndexRank())
-    return op->emitOpError()
-           << "expected " << viewType.getViewIndexRank()
-           << " index operands (based on view type), got " << indexTypes.size();
-
-  if (tileType != viewType.getViewTileType())
-    return op->emitOpError()
-           << "expected tile type to be " << viewType.getViewTileType()
-           << " (based on view type), got " << tileType;
-
-  if (failed(viewType.verifyIndices([&]() { return op->emitOpError(); },
-                                    indexTypes)))
+  if (failed(verifyViewIndexTileMatch(op->getOperation(), op->getView(),
+                                      op->getIndex(), op->getTile()))) {
     return failure();
-
+  }
   return verifyOptHintsCommon(op);
+}
+
+static inline LogicalResult verifyViewLoadStoreCommon(Operation *op,
+                                                      Value viewVal,
+                                                      ValueRange indexVals,
+                                                      Value tileVal) {
+  return verifyViewIndexTileMatch(op, viewVal, indexVals, tileVal);
 }
 
 /// Verifies that every dimension in `shape`
@@ -262,6 +293,35 @@ verifyAtomicMemoryOrdering(OpTy op, MemoryOrderingSemantics semantics) {
       semantics != MemoryOrderingSemantics::ACQ_REL) {
     return op.emitOpError("memory ordering semantics must be one of: "
                           "relaxed, acquire, release, acq_rel");
+  }
+  return success();
+}
+
+/// Extract PtrAttrAttr from a TileView type's embedded TensorViewType.
+/// Returns failure if the view type is not recognized.
+static inline FailureOr<PtrAttrAttr> getViewPtrAttr(Operation *op,
+                                                    Type viewType) {
+  if (auto pv = dyn_cast<PartitionViewType>(viewType)) {
+    return pv.getTensorView().getPtrAttr();
+  }
+  if (auto sv = dyn_cast<StridedViewType>(viewType)) {
+    return sv.getTensorView().getPtrAttr();
+  }
+  if (auto gv = dyn_cast<GatherScatterViewType>(viewType)) {
+    return gv.getTensorView().getPtrAttr();
+  }
+  if (auto tv = dyn_cast<TensorViewType>(viewType)) {
+    return tv.getPtrAttr();
+  }
+  return op->emitOpError("unknown TileView type: ") << viewType;
+}
+
+/// Verify that a TileView operand does not have a restricted ptr_attr.
+template <typename OpT>
+static LogicalResult verifyUnrestrictedViewPtrAttr(OpT op, Value viewOperand) {
+  auto ptrAttrOrErr = getViewPtrAttr(op.getOperation(), viewOperand.getType());
+  if (failed(ptrAttrOrErr)) {
+    return failure();
   }
   return success();
 }

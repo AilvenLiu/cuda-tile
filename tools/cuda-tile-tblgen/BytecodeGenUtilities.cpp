@@ -23,16 +23,15 @@
 using namespace llvm;
 using namespace mlir;
 
-std::pair<std::string, std::string>
-mlir::tblgen::parseVersion(StringRef version) {
+std::pair<StringRef, StringRef> mlir::tblgen::parseVersion(StringRef version) {
   const size_t dotPos = version.find('.');
   const StringRef majorStr = version.substr(0, dotPos);
   const StringRef minorStr =
       (dotPos != StringRef::npos) ? version.substr(dotPos + 1) : "0";
-  return {majorStr.str(), minorStr.str()};
+  return {majorStr, minorStr};
 }
 
-std::pair<std::string, std::string>
+std::pair<StringRef, StringRef>
 mlir::tblgen::extractVersionFromAttribute(const NamedAttribute &namedAttr,
                                           const Operator &op) {
   const StringRef attrName = namedAttr.name;
@@ -49,8 +48,7 @@ mlir::tblgen::extractVersionFromAttribute(const NamedAttribute &namedAttr,
       if (!decorator.getDef().isSubClassOf("CudaTileArgMetadata"))
         continue;
 
-      const std::string version =
-          decorator.getDef().getValueAsString("sinceVersion").str();
+      StringRef version = decorator.getDef().getValueAsString("sinceVersion");
       return parseVersion(version);
     }
 
@@ -74,6 +72,30 @@ mlir::tblgen::extractDefaultValue(const NamedAttribute &namedAttr) {
   return std::nullopt;
 }
 
+std::optional<std::string>
+mlir::tblgen::extractSameOperandRankName(const NamedAttribute &namedAttr,
+                                         const Operator &op) {
+  const StringRef attrName = namedAttr.name;
+
+  // Search through operation arguments for matching attribute.
+  for (unsigned i = 0, e = op.getNumArgs(); i != e; ++i) {
+    const auto arg = op.getArg(i);
+    const auto *argAttr = arg.dyn_cast<NamedAttribute *>();
+    if (!argAttr || argAttr->name != attrName) {
+      continue;
+    }
+
+    for (const auto &decorator : op.getArgDecorators(i)) {
+      if (!decorator.getDef().isSubClassOf("RequireSameOperandRank")) {
+        continue;
+      }
+      return decorator.getDef().getValueAsString("rankOperand").str();
+    }
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 std::string mlir::tblgen::extractVersionFromOperation(const Operator &op) {
   const auto &def = op.getDef();
   if (const auto *metadata = def.getValueAsOptionalDef("metadata"))
@@ -83,7 +105,7 @@ std::string mlir::tblgen::extractVersionFromOperation(const Operator &op) {
                                    "' is missing version metadata");
 }
 
-std::pair<std::string, std::string>
+std::pair<StringRef, StringRef>
 mlir::tblgen::extractVersionFromOperand(unsigned operandIndex,
                                         const Operator &op) {
   assert(operandIndex < static_cast<unsigned>(op.getNumOperands()) &&
@@ -102,8 +124,8 @@ mlir::tblgen::extractVersionFromOperand(unsigned operandIndex,
           if (!decorator.getDef().isSubClassOf("CudaTileArgMetadata"))
             continue;
 
-          const std::string version =
-              decorator.getDef().getValueAsString("sinceVersion").str();
+          StringRef version =
+              decorator.getDef().getValueAsString("sinceVersion");
           return parseVersion(version);
         }
 
@@ -142,13 +164,24 @@ mlir::tblgen::getVersionOrderedBitAssignments(const Operator &op) {
   };
   std::map<VersionKey, std::vector<StringRef>> versionGroups;
 
+  // Helper to parse version string to VersionKey.
+  auto parseToVersionKey = [&op](StringRef majorStr, StringRef minorStr) {
+    int major, minor;
+    if (majorStr.getAsInteger(10, major) || minorStr.getAsInteger(10, minor)) {
+      PrintFatalError(op.getLoc(), "invalid version string in operation '" +
+                                       op.getOperationName() + "': " +
+                                       majorStr.str() + "." + minorStr.str());
+    }
+    return VersionKey{major, minor};
+  };
+
   // Group optional attributes by version (attributes processed first within
   // each version).
   for (const auto &namedAttr : op.getAttributes()) {
     if (namedAttr.attr.isOptional()) {
       auto [majorStr, minorStr] = extractVersionFromAttribute(namedAttr, op);
-      VersionKey version{std::stoi(majorStr), std::stoi(minorStr)};
-      versionGroups[version].push_back(namedAttr.name);
+      versionGroups[parseToVersionKey(majorStr, minorStr)].push_back(
+          namedAttr.name);
     }
   }
 
@@ -159,8 +192,8 @@ mlir::tblgen::getVersionOrderedBitAssignments(const Operator &op) {
          llvm::enumerate(op.getOperands())) {
       if (odsOperand.isOptional()) {
         auto [majorStr, minorStr] = extractVersionFromOperand(operandIndex, op);
-        VersionKey version{std::stoi(majorStr), std::stoi(minorStr)};
-        versionGroups[version].push_back(odsOperand.name);
+        versionGroups[parseToVersionKey(majorStr, minorStr)].push_back(
+            odsOperand.name);
       }
     }
   }
@@ -180,7 +213,7 @@ mlir::tblgen::getVersionOrderedBitAssignments(const Operator &op) {
   return {bitAssignments, minVersion};
 }
 
-std::pair<std::string, std::string>
+std::pair<StringRef, StringRef>
 mlir::tblgen::extractVersionFromResult(unsigned resultIndex,
                                        const Operator &op) {
   assert(resultIndex < static_cast<unsigned>(op.getNumResults()) &&
@@ -191,8 +224,7 @@ mlir::tblgen::extractVersionFromResult(unsigned resultIndex,
     if (!decorator.getDef().isSubClassOf("CudaTileArgMetadata"))
       continue;
 
-    const std::string version =
-        decorator.getDef().getValueAsString("sinceVersion").str();
+    StringRef version = decorator.getDef().getValueAsString("sinceVersion");
     return parseVersion(version);
   }
 

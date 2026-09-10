@@ -23,7 +23,7 @@ cuda_tile.module @invalid_join {
 cuda_tile.module @invalid_load_ptr_tko {
   cuda_tile.testing$func @funcload(%arg0: !cuda_tile.tile<16x32xf32>) {
     %t = make_token : !cuda_tile.token
-    // expected-error @below{{operand #0 must be tile of Pointer type values, but got '!cuda_tile.tile<16x32xf32>'}}
+    // expected-error @below{{'cuda_tile.load_ptr_tko' op operand #0 must be tile of Pointer type values, but got '!cuda_tile.tile<16x32xf32>'}}
     load_ptr_tko weak %arg0 token=%t : tile<16x32xf32> -> tile<16x32xf32>, token
   }
 }

@@ -48,6 +48,7 @@ int main(int argc, char **argv) {
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerInlinerPass();
+  mlir::registerStripDebugInfoPass();
   mlir::cuda_tile::registerCudaTilePasses();
 
 #ifdef CUDA_TILE_ENABLE_TESTING

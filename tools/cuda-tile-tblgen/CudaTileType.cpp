@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
 // This file implements the CUDA Tile dialect type parsing and printing
 // utilities.
 //
@@ -42,24 +43,35 @@ CudaTileElementType elementTypeFromString(StringRef name) {
     return kF8E4M3FN;
   if (name == "CudaTile_Float8E5M2")
     return kF8E5M2;
+  if (name == "CudaTile_Float8E8M0FNU") {
+    return kF8E8M0FNU;
+  }
   if (name == "CudaTile_Float4E2M1FN")
     return kF4E2M1FN;
+  if (name == "CudaTile_Float8E5M3FNU") {
+    return kF8E5M3FNU;
+  }
   if (name == "CudaTile_Float16")
     return kF16;
   if (name == "CudaTile_BFloat16")
     return kBF16;
   if (name == "CudaTile_Float32")
     return kF32;
-  if (name == "CudaTile_TF32")
+  if (name == "CudaTile_TFloat32") {
     return kTF32;
+  }
   if (name == "CudaTile_Float64")
     return kF64;
   return kUnknown;
 }
 
 std::vector<CudaTileElementType> allElementTypes() {
-  return {kI1,       kI4,     kI8,  kI16,  kI32,  kI64, kF4E2M1FN,
-          kF8E4M3FN, kF8E5M2, kF16, kBF16, kTF32, kF32, kF64};
+  std::vector<CudaTileElementType> types = {
+      kI1,     kI4,        kI8,  kI16,  kI32,  kI64, kF4E2M1FN, kF8E4M3FN,
+      kF8E5M2, kF8E8M0FNU, kF16, kBF16, kTF32, kF32, kF64,
+  };
+  types.push_back(kF8E5M3FNU);
+  return types;
 }
 
 std::ostream &operator<<(std::ostream &os, CudaTileElementType elementType) {
@@ -88,6 +100,9 @@ std::ostream &operator<<(std::ostream &os, CudaTileElementType elementType) {
   case kF8E5M2:
     os << "fp8e5m2";
     break;
+  case kF8E8M0FNU:
+    os << "fp8e8m0fnu";
+    break;
   case kF16:
     os << "f16";
     break;
@@ -105,6 +120,9 @@ std::ostream &operator<<(std::ostream &os, CudaTileElementType elementType) {
     break;
   case kF4E2M1FN:
     os << "fp4e2m1fn";
+    break;
+  case kF8E5M3FNU:
+    os << "f8e5m3fnu";
     break;
   case kUnknown:
     os << "unknown";
@@ -148,6 +166,9 @@ TileIRType TileIRType::float_tile() {
   // Add fp8 and tf32 types
   types.emplace_back(std::make_shared<ElementType>(kF8E4M3FN));
   types.emplace_back(std::make_shared<ElementType>(kF8E5M2));
+  types.emplace_back(std::make_shared<ElementType>(kF8E8M0FNU));
+  types.emplace_back(std::make_shared<ElementType>(kF4E2M1FN));
+  types.emplace_back(std::make_shared<ElementType>(kF8E5M3FNU));
   types.emplace_back(std::make_shared<ElementType>(kTF32));
 
   return TileIRType(std::make_shared<TileType>(types));
@@ -336,6 +357,11 @@ raw_ostream &operator<<(raw_ostream &os, const TileIRType &ty) {
 TileIRType convertAttributeDef(const std::string &opName,
                                const Record &attrDef) {
   auto attrName = attrDef.getName().str();
+  auto renderCudaTileAttrName = [&](StringRef recordName) {
+    recordName.consume_front("CudaTile_");
+    recordName.consume_back("Attr");
+    return recordName.str();
+  };
   // std::cout << "attrName: " << attrName.str() << std::endl;
   if (attrName == "UnitAttr") {
     return TileIRType::flag();
@@ -372,6 +398,10 @@ TileIRType convertAttributeDef(const std::string &opName,
     return TileIRType::builtin("bool");
   } else if (attrName == "ArrayAttr") {
     return TileIRType::builtin("Array");
+  } else if (attrName == "DictionaryAttr") {
+    return TileIRType::builtin("Dictionary");
+  } else if (attrDef.isSubClassOf("TypedArrayAttrBase")) {
+    return TileIRType::builtin("Array");
 
   } else if (attrName == "StringElementsAttr") {
     return TileIRType::builtin("String");
@@ -400,10 +430,16 @@ TileIRType convertAttributeDef(const std::string &opName,
     return TileIRType::attribute(opName, "PaddingValue");
   } else if (attrName == "CudaTile_DivRoundingModeAttr") {
     return TileIRType::attribute(opName, "DivRoundingMode");
+  } else if (attrName == "CudaTile_SymbolVisibilityAttr") {
+    return TileIRType::attribute(opName, "SymbolVisibility");
   } else if (attrName == "Builtin_DenseTypedElementsAttr") {
     return TileIRType::builtin("DenseConstant");
   } else if (attrName == "DenseBoolArrayAttr") {
     return TileIRType::builtin("DenseBoolArray");
+  } else if (StringRef(attrName).starts_with("CudaTile_") &&
+             (attrDef.isSubClassOf("CudaTileAttrDef") ||
+              attrDef.isSubClassOf("EnumAttrInfo"))) {
+    return TileIRType::attribute(opName, renderCudaTileAttrName(attrName));
   } else {
     PrintFatalError("convertAttributeDef: unhandled attribute type: `" +
                     attrName + "`");
@@ -467,16 +503,6 @@ TileIRType getType(const Record &tcDef) {
   // Base Types
   if (tcDef.getName() == "CudaTile_AnyType" || tcDef.getName() == "AnyType") {
     return TileIRType::builtin("Any");
-  } else if (tcDef.getName() == "CudaTile_Float8E4M3FN") {
-    return TileIRType::tile(
-        {TileIRType(std::make_shared<ElementType>(kF8E4M3FN))});
-  } else if (tcDef.getName() == "CudaTile_Float8E5M2") {
-    return TileIRType::tile(
-        {TileIRType(std::make_shared<ElementType>(kF8E5M2))});
-  } else if (tcDef.getName() == "CudaTile_TFloat32") {
-    return TileIRType::tile({TileIRType(std::make_shared<ElementType>(kTF32))});
-  } else if (tcDef.getName() == "CudaTile_Tf32FloatTileType") {
-    return TileIRType::tile({TileIRType(std::make_shared<ElementType>(kTF32))});
   } else if (tcDef.getName() == "CudaTile_FloatTileType") {
     return TileIRType::float_tile();
   } else if (tcDef.getName() == "CudaTile_PointerTileType") {
@@ -492,6 +518,8 @@ TileIRType getType(const Record &tcDef) {
     return TileIRType::builtin("partition_view");
   } else if (tcDef.getName() == "CudaTile_StridedViewType") {
     return TileIRType::builtin("strided_view");
+  } else if (tcDef.getName() == "CudaTile_GatherScatterViewType") {
+    return TileIRType::builtin("gather_scatter_view");
   } else if (tcDef.getName() == "CudaTile_TileView") {
     // Today we represent the view type interface as a builtin type.
     return TileIRType::builtin("view_type");

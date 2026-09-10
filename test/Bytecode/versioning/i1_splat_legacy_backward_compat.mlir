@@ -1,6 +1,6 @@
-// Backward-compat regression: v13.3-era binaries wrote i1 splat
-// DenseElementsAttr payloads as a single byte regardless of the tensor
-// shape, with 0xff for true and 0x00 for false.
+// Backward-compat regression: legacy v13.3-era binaries wrote i1 splat
+// `DenseElementsAttr` payloads as a single byte regardless of the tensor
+// shape, with `0xff` for true and `0x00` for false.
 //
 // RUN-1 checks the reader decodes the v13.3 bytes to the correct values.
 // RUN-2 checks the writer targeting 13.3 reproduces the bytes exactly.

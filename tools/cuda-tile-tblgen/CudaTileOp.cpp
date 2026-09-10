@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
 // This file implements the CUDA Tile dialect operations.
 //
 //===----------------------------------------------------------------------===//
@@ -38,7 +39,7 @@ getTraitConstraint(const std::string &traitName) {
       {"AlwaysSpeculatableImplTrait",
        "The operation may be speculatively executed without side effects."},
       {"ConditionallySpeculatable",
-       "The operation is conditionally speculatable"
+       "The operation is conditionally speculatable "
        "based on the specific operands and attributes."},
       {"InferTypeOpInterface", "The operation's result type may be inferred "
                                "from its operands and attributes."},
@@ -277,9 +278,10 @@ getOperationConstraints(const mlir::tblgen::Operator &op,
     } else {
       std::string traitName = def.getName().str();
       auto traitConstraint = getTraitConstraint(traitName);
-      if (traitConstraint)
+      if (traitConstraint) {
         constraints.push_back(
             OperationConstraint(OperationTrait{*traitConstraint}));
+      }
     }
   }
 

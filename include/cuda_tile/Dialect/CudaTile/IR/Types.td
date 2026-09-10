@@ -67,6 +67,7 @@ def CudaTile_Float8E4M3FN : CudaTileTypeAlias<F8E4M3FN, "13.1", "f8E4M3FN">;
 def CudaTile_Float8E5M2   : CudaTileTypeAlias<F8E5M2, "13.1", "f8E5M2">;
 def CudaTile_Float8E8M0FNU : CudaTileTypeAlias<F8E8M0FNU, "13.2", "f8E8M0FNU">;
 def CudaTile_Float4E2M1FN : CudaTileTypeAlias<F4E2M1FN, "13.3", "f4E2M1FN">;
+def CudaTile_Float8E5M3FNU : CudaTileTypeAlias<F8E5M3FNU, "13.4", "f8E5M3FNU">;
 def CudaTile_AnyFloat : AnyTypeOf<[CudaTile_Float16,
                                    CudaTile_BFloat16,
                                    CudaTile_Float32,
@@ -76,6 +77,7 @@ def CudaTile_AnyFloat : AnyTypeOf<[CudaTile_Float16,
                                    CudaTile_Float8E5M2,
                                    CudaTile_Float8E8M0FNU,
                                    CudaTile_Float4E2M1FN,
+                                   CudaTile_Float8E5M3FNU,
                                   ]> {
   let cppFunctionName = "isAnyFloat";
 }
@@ -93,22 +95,31 @@ def CudaTile_PointerType : CudaTileTypeDef<"Pointer", "ptr", "pointerType", "13.
   let summary = "Pointer type";
 
   let description = [{
-    An elemental pointer type $pointerType represents a single location in
+    An element pointer type $pointerType represents a single location in
     global device memory. Pointer types are typed, i.e., they carry the
-    type they point to. Any `CudaTile_NumberType` can be used as pointee type.
-  }];
+    type they point to. Any numeric type can be used as pointee type.
+
+    An optional :code:`#cuda_tile.ptr_attr<...>` suffix records the pointer
+    classification; :code:`#cuda_tile.ptr_attr<none>` denotes an ordinary local
+    pointer.
+  }]
+  ;
 
   let builders = [
     TypeBuilderWithInferredContext<(ins "Type":$pointeeType), [{
-      return $_get(pointeeType.getContext(), pointeeType);
+      return $_get(pointeeType.getContext(), pointeeType, ::mlir::cuda_tile::PtrAttrAttr{});
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$pointeeType, "::mlir::cuda_tile::PtrAttrAttr":$ptrAttr), [{
+      return $_get(pointeeType.getContext(), pointeeType, ptrAttr);
     }]>
   ];
 
   let parameters = (ins
-    CudaTileConstrainedTypeParam<CudaTile_NumberType, "13.1">:$pointeeType
+    CudaTileConstrainedTypeParam<CudaTile_NumberType, "13.1">:$pointeeType,
+    CudaTileTypeParam<OptionalParameter<"::mlir::cuda_tile::PtrAttrAttr", "ptr_attr">, "13.4">:$ptrAttr
   );
 
-  let assemblyFormat = "`<` custom<CudaTileType>($pointeeType) `>`";
+  let assemblyFormat = "`<` custom<CudaTileType>($pointeeType) (`,` $ptrAttr^)? `>`";
 }
 
 //===----------------------------------------------------------------------===//
@@ -127,16 +138,16 @@ def CudaTile_TileType : CudaTileTypeDef<"Tile", "tile", "tileType", "13.1",
   let summary = "Tile type";
 
   let description = [{
-    A tile type has a shape and and element type. The shape of the tile
+    A tile is a value type that has a shape and an element type. The shape of the tile
     must be fully static. All elements of the tile have the same element
-    type. Any `CudaTile_NumberType` or `CudaTile_PointerType` can be used as
+    type. Any numeric type or pointer type can be used as an
     element type.
 
     Only power-of-two shape dimensions are supported.
 
     Examples:
     ```
-    !cuda_tile.tile<5x4xf32>
+    !cuda_tile.tile<8x4xf32>
 
     !cuda_tile.tile<4x!cuda_tile.ptr<i8>>
     ```
@@ -212,7 +223,7 @@ def CudaTile_TensorViewType : CudaTileTypeDef<
 
     It consists of:
     * :code:`elementType`: the type of the elements in the :code:`tensor_view`.
-    * :code`shape`: an integer array that specifies the size of each dimension.
+    * :code:`shape`: an integer array that specifies the size of each dimension.
       Sizes must be strictly positive.
     * :code:`strides`: an integer array that describes the stride of each
       dimension. The stride is the number of elements to offset in memory when
@@ -227,13 +238,16 @@ def CudaTile_TensorViewType : CudaTileTypeDef<
       Only power-of-two tile dimensions are supported.
 
     .. note::
+
       4-bit element types are packed densely in global memory. Tensor views with
       4-bit element types must have at least one dimension with a unit stride
-      and such dimensions must have an even number of elements.
+      and such dimensions must have an even number of elements to ensure
+      byte-alignment.
 
       Elements :code:`i` and :code:`i+1` (where :code:`i` is a multiple of 2)
       are packed into a byte as follows: element :code:`i` is stored in bits
       :code:`3...0` and element :code:`i+1` is stored in bits :code:`7...4`.
+      This corresponds to a little-endian nibble order.
 
       Example: A :code:`tensor_view<2xf4E2M1FN, strides=[1]>` with values
       :code:`[0.5, 1.5]` is stored as:
@@ -277,8 +291,18 @@ def CudaTile_TensorViewType : CudaTileTypeDef<
   let parameters = (ins
     CudaTileConstrainedTypeParam<CudaTile_NumberType, "13.1">:$elementType,
     CudaTileTypeParam<ArrayRefParameter<"int64_t", "shape of the tensor view">, "13.1">:$shape,
-    CudaTileTypeParam<ArrayRefParameter<"int64_t", "strides of the tensor view">, "13.1">:$strides
+    CudaTileTypeParam<ArrayRefParameter<"int64_t", "strides of the tensor view">, "13.1">:$strides,
+    CudaTileTypeParam<OptionalParameter<"::mlir::cuda_tile::PtrAttrAttr">, "13.4">:$ptrAttr
   );
+
+  let builders = [
+    TypeBuilder<(ins "Type":$elementType,
+                     "ArrayRef<int64_t>":$shape,
+                     "ArrayRef<int64_t>":$strides), [{
+      return $_get($_ctxt, elementType, shape, strides,
+                   ::mlir::cuda_tile::PtrAttrAttr{});
+    }]>
+  ];
 
   let extraClassDeclaration = [{
     /// Value used to represent dynamic shape and stride dimensions.
@@ -310,11 +334,10 @@ def CudaTile_PartitionViewType : CudaTileTypeDef<
   let description = [{
     :code:`!cuda_tile.partition_view` represents a view into a
     :code:`tensor_view` where tiles are laid out in a grid pattern across the
-    original :code:`tensor_view`. The grid pattern is a perfectly aligned
-    partition of the :code:`tensor_view`.
+    original :code:`tensor_view`. The grid is aligned with the start of each
+    dimension and there are no gaps or overlaps between tiles.
 
-    :code:`!cuda_tile.partition_view` is a :code:`TileView` with the following
-    specification:
+    :code:`!cuda_tile.partition_view` has the following specification:
     * Index space rank: as many dimensions as the underlying
       :code:`tensor_view`.
     * Tile sizes: as specified by :code:`tile_shape`.
@@ -419,24 +442,15 @@ def CudaTile_PartitionViewType : CudaTileTypeDef<
 
     Indices into the partition view must lie within the index space of the
     partition view. Otherwise, the behavior is undefined. For example, loading
-    the tile at index :code:`(0, 8)` from a partition view of type :`!pv_2d` is
-    invalid.
+    the tile at index :code:`(0, 8)` from a partition view of type :code:`!pv_2d` above
+    is invalid, because the maximum index in dimension 1 is 7.
 
-    .. note::
-
-      Even with valid indices, behavior is undefined if the linear offset
-      :code:`sum(index[i] * tile_size[i] * stride[i])` overflows signed 64-bit
-      arithmetic (exceeding :code:`2^63-1`), causing wrap-around to an incorrect
-      memory address. The compiler conservatively uses 64-bit arithmetic when bounds
-      analysis detects potential overflow, but cannot prevent all cases (e.g., dynamic
-      strides or extremely large products). Users must ensure all valid indices produce
-      offsets in the range :code:`[0, 2^63-1]`.
-
-    While partition view indices must be in-bounds, the tile itself may run
-    out-of-bounds. I.e., it may fully or partially overlap with the underlying
+    While partition view indices must be in-bounds, the accessed tile itself may run
+    out-of-bounds. I.e., it may only partially overlap with the underlying
     :code:`tensor_view`. Tiles cannot be fully outside of the underlying
     :code:`tensor_view` because that would require the partition view indices
-    to lie outside of the the partition view index space.
+    to lie outside the partition view index space.
+    When tiles are partially out of bounds, operations follow the following semantics:
     * **Load operations**: If :code:`padding_value` is set, out-of-bounds tile
       elements yield the padding value. If not set, out-of-bounds elements yield
       unspecified values.
@@ -493,11 +507,11 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
   let description = [{
     :code:`!cuda_tile.strided_view` represents a view into a
     :code:`tensor_view` where tiles are laid out in a grid pattern across the
-    original :code:`tensor_view`. The grid pattern's striding factor is
+    original :code:`tensor_view`. The grid is aligned with the start of each
+    dimension, but the grid pattern's striding factor is
     parametric, allowing interleaved or overlapping tiles.
 
-    :code:`!cuda_tile.strided_view` is a :code:`TileView` with the following
-    specification:
+    :code:`!cuda_tile.strided_view` has the following specification:
     * Index space rank: as many dimensions as the underlying
       :code:`tensor_view`.
     * Tile sizes: as specified by :code:`tile_shape`.
@@ -506,10 +520,10 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
     * :code:`tile_shape`: an integer array that describes the shape of the
       tiles in the view.
     * :code:`traversal_strides`: an integer array that describes the traversal
-      strides when traversing the parent memref. For example, if the shape of
-      tiles is 2x2 and the traversal strides are [3,3], the parent memref will
+      strides when traversing the underlying :code:`tensor_view`. For example, if the shape of
+      tiles is 2x2 and the traversal strides are [3,3], the :code:`tensor_view` will
       be traversed with a gap of one element between each tile. Alternatively,
-      if the traversal strides are [1,1], the parent memref will be traversed
+      if the traversal strides are [1,1], the :code:`tensor_view` will be traversed
       with an overlapping sliding window, advancing by one element for each
       tile.
     * :code:`tensor_view`: the type of the :code:`tensor_view` into which the
@@ -551,13 +565,12 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
 
     // (2) A view into a 16xf32 tensor_view with a tile size of 2 and a
     // traversal stride of 3. This time, one out of three elements are
-    // skipped, as the tile base jumps three elements while covering two.
-    // Notice that tile 5 is partially out of bounds.
-    // 
+    // skipped, as the stride moves three elements while the tile only
+    // covers two. Notice that tile 5 is partially out of bounds.
     //
     //                               16
     // ←─────────────────────────────────────────────────────────────→
-    // (0) (0) ( ) (1) (1) ( ) (2) (2) ( ) (3) (3) ( ) (4) (4) ( ) (5) (5?)
+    // (0) (0) ( ) (1) (1) ( ) (2) (2) ( ) (3) (3) ( ) (4) (4) ( ) (5) (5)
     //
     !sv_1d_tra3 = !cuda_tile.strided_view<
       tile=(2),
@@ -569,13 +582,14 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
     // traversal stride of 1. This time, tiles are overlapping, and the
     // same element will be present in multiple tiles. For example,
     // element 1 of the tensor view is present both as the second element of
-    // tile 0, and as the first element tile 1. Notice that tile 7 is also
-    // partially out of bounds.
+    // tile 0, and as the first element tile 1. Tile 7 is partially out of bounds.
+    // (Note the space is still 1-dimensional; the second row indicates overlap,
+    // not a second dimension.)
     // 
     //               8
     // ←─────────────────────────────→
     // (0) (0) (2) (2) (4) (4) (6) (6)
-    //     (1) (1) (3) (3) (5) (5) (7) (7?)
+    //     (1) (1) (3) (3) (5) (5) (7) (7)
     //
     !sv_1d_tra1 = !cuda_tile.strided_view<
       tile=(2),
@@ -583,10 +597,11 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
       tensor_view<8xf32, strides=[1]>
     >
 
-    // (4) A view into a 32x16xf32 tensor_view with a tile size of 4x2 and
-    // traversal strides of [4,3]. By convention, in the below table, the
-    // Y axis corresponds to the first tensor_view dimension and the X axis
-    // corresponds to the second one.
+    // (4) A view into a 64x16xf32 tensor_view with a tile size of 4x2 and
+    // traversal strides of [4,3]. Tiles are adjacent in the first dimension,
+    // but have a gap of one element in the second dimension. By convention,
+    // in the below table, the Y axis corresponds to the first tensor_view
+    // dimension and the X axis corresponds to the second one.
     //
     //                                   16
     //       ←────────────────────────────────────────────────────────── ...
@@ -607,10 +622,12 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
       tensor_view<64x16xf32, strides=[16, 1]>
     >
 
-    // (5) A view into a 32x16xf32 tensor_view with a tile size of 4x2 and
-    // traversal strides of [4,3]. The first tile dimension is mapped to the
-    // second tensor_view dimension. The second tile dimension is mapped to
-    // the first tensor_view dimension.
+    // (5) A view into a 64x16xf32 tensor_view with a tile size of 4x2 and
+    // traversal strides of [4,3], as above, but with dim_map=[1, 0].
+    // (The first tile dimension is mapped to the second tensor_view dimension
+    // and the second tile dimension is mapped to the first tensor_view dimension.)
+    // Tiles are adjacent in the second dimension, but have a gap of one element in
+    // the first dimension.
     //
     //                                   16
     //       ←────────────────────────────────────────────────────────── ...
@@ -638,7 +655,7 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
     //
     // %0 = load_view_tko ... %view[%a, %b]
     //     : strided_view<tile=(4x2), traversal_strides=[4,2], ...,
-                          dim_map=[1, 0]> -> tile<4x2xf32>
+    //                    dim_map=[1, 0]> -> tile<4x2xf32>
     //
     // Is identical to:
     //
@@ -649,24 +666,25 @@ def CudaTile_StridedViewType : CudaTileTypeDef<
     ```
 
     The strided view index space is determined by the
-    :code:`traversal_strides`, the :code:`tensor_view` shape and
+    :code:`traversal_strides`, the :code:`tensor_view` shape, and
     :code:`dim_map`. Partial tiles at the edges of the :code:`tensor_view`
     are included in the index space. In the above examples, :code:`!sv_1d_tra2`
     has an index space shape of :code:`8`, whereas :code:`!sv_1d_tra3` has an
     index space shape of :code:`6`. Similarly, :code:`!sv_2d` has an index
     space shape of :code:`16x6`, and :code:`!sv_2d_transposed` has an index
-    space shape of :code:`22x4`.
+    space shape of :code:`4x22`.
 
-    Indices into the strided view must lie within the index space of the
+    Indices accessing the strided view must lie within the index space of the
     strided view. Otherwise, the behavior is undefined. For example, loading
     the tile at index :code:`(0, 6)` from a strided view of type :code:`!sv_2d`
-    is invalid.
+    above is invalid, as the maximum index in dimension 1 is 5.
 
-    While strided view indices must be in-bounds, the tile itself may run
-    out-of-bounds. I.e., it may fully or partially overlap with the underlying
+    While strided view indices must be in-bounds, the accessed tile itself may
+    run out-of-bounds. I.e., it may only partially overlap with the underlying
     :code:`tensor_view`. Tiles cannot be fully outside of the underlying
     :code:`tensor_view` because that would require the strided view indices
-    to lie outside of the the strided view index space.
+    to lie outside of the strided view index space.
+    When tiles are partially out of bounds, operations follow the following semantics:
     * **Load operations**: If :code:`padding_value` is set, out-of-bounds tile
       elements yield the padding value. If not set, out-of-bounds elements yield
       unspecified values.
@@ -722,27 +740,23 @@ def CudaTile_GatherScatterViewType : CudaTileTypeDef<
 
   let description = [{
     :code:`!cuda_tile.gather_scatter_view` represents a view into a
-    :code:`tensor_view` where tiles are laid out in a grid pattern across the
-    original :code:`tensor_view`. One of the dimensions can be loaded
-    in a gather/scatter pattern: individual rows in that dimension can be
-    selected sparsely to construct the final tile.
+    :code:`tensor_view` where one dimension is accessed using a sparse
+    gather/scatter pattern while the remaining dimensions are accessed
+    contiguously.
 
-
-    :code:`!cuda_tile.gather_scatter_view` is a :code:`TileView` with the following
-    specification:
+    :code:`!cuda_tile.gather_scatter_view` has the following specification:
     * Index space rank: as many dimensions as the underlying
       :code:`tensor_view`.
     * Tile sizes: as specified by :code:`tile_shape`.
-    * Indices: all indices must be scalar values except for the `gather/scatter` dimension 
-      where it must be a 1D tile containing the indices of the rows to collect.
-
 
     It consists of:
-    * :code:`tile_shape`: a dense integer array that describes the shape of the
+    * :code:`tile_shape`: an integer array that describes the shape of the
       tiles in the view.
     * :code:`tensor_view`: the type of the :code:`tensor_view` into which the
       view is looking.
-    * :code:`sparse_dim`: a uint32_t value that specifies which dimension to gather/scatter over.
+    * :code:`sparse_dim`: a non-negative integer that specifies which dimension
+      to gather/scatter over. Must be strictly less than the rank of the
+      :code:`tensor_view`.
     * :code:`padding_value`: an optional enum, specifying the value that should
       be used for out-of-bounds accesses (loads) into the :code:`tensor_view`.
 
@@ -753,7 +767,148 @@ def CudaTile_GatherScatterViewType : CudaTileTypeDef<
     * :code:`pos_inf`: positive infinity
     * :code:`neg_inf`: negative infinity
 
-    !cuda_tile.gather_scatter_view<tile=(8x16), padding_value=zero, tensor_view<...>, sparse_dim=0>
+    .. note::
+
+      Only power-of-two tile dimensions are supported.
+
+    When loading or storing via a gather_scatter_view, the index at position
+    :code:`sparse_dim` must be a **1D tile** whose size equals
+    :code:`tile_shape[sparse_dim]`. Each element of this tile is an
+    independent index into the underlying :code:`tensor_view` along that
+    dimension. The loaded or stored tile will be the concatenation of the
+    elements in the rows selected by the sparse dimension index. All other
+    indices must be **scalar tiles** of the same element type, each choosing
+    the offset in the underlying :code:`tensor_view` along that dimension
+    and selecting a contiguous block of :code:`tile_shape[dim]` elements.
+
+    Examples:
+
+    ```
+    // (1) A 1D gather/scatter view over an 8xf32 tensor_view with a tile
+    // size of 4 and sparse_dim=0. Since the view is 1D, the only index is
+    // the gather index: a size-4 1D tile of element indices. The table below
+    // visualizes a load with gather_indices=[6, 1, 4, 3]. Gathered elements
+    // are indicated with their index in the single loaded tile. ( ) marks
+    // elements that are not gathered.
+    //
+    //               8
+    // ←─────────────────────────────→
+    // ( ) (1) ( ) (3) (2) ( ) (0) ( )
+    //
+    // In pseudocode, we can say that loading with gather_indices=[6, 1, 4, 3]
+    // is equivalent to the following:
+    //   result = [tensor_view[6], tensor_view[1], tensor_view[4], tensor_view[3]]
+    //
+    !gsv_1d = !cuda_tile.gather_scatter_view<
+      tile=(4),
+      tensor_view<8xf32, strides=[1]>,
+      sparse_dim=0
+    >
+
+    // (2) A 2D gather/scatter view over an 8x8xf32 tensor_view with tile
+    // size 4x4 and sparse_dim=0. The first index (at sparse_dim) is a size-4
+    // 1-D tile of row indices; the second index is a scalar selecting a
+    // block of 4 contiguous columns. The table below visualizes a load
+    // with gather_indices=[5, 1, 7, 3] and col_idx=0. Each number
+    // indicates the result row, and ( ) marks elements not gathered.
+    //
+    //                      8
+    //       ←─────────────────────────────→
+    //     ↑ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 0: not gathered
+    //     │ (1) (1) (1) (1) ( ) ( ) ( ) ( )    row 1: → result row 1
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 2: not gathered
+    //   8 │ (3) (3) (3) (3) ( ) ( ) ( ) ( )    row 3: → result row 3
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 4: not gathered
+    //     │ (0) (0) (0) (0) ( ) ( ) ( ) ( )    row 5: → result row 0
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 6: not gathered
+    //     ↓ (2) (2) (2) (2) ( ) ( ) ( ) ( )    row 7: → result row 2
+    //
+    !gsv_2d = !cuda_tile.gather_scatter_view<
+      tile=(4x4),
+      tensor_view<8x8xf32, strides=[8, 1]>,
+      sparse_dim=0
+    >
+
+    // (3) A larger gather/scatter view with zero-padding for out-of-bounds
+    // accesses. If the index for dimension 1 is in the range [241, 255],
+    // the out-of-bounds elements will be filled with zero. If no padding value
+    // were set, the values would be unspecified. Out of bounds sparse dimension
+    // indices, in dimension 0, will yield a row of zero (the padding value).
+    // Likewise, the values of the entire row are unspecified if no padding
+    // value is set.
+    //
+    !gsv_2d_padded = !cuda_tile.gather_scatter_view<
+      tile=(8x16),
+      padding_value = zero,
+      tensor_view<128x256xf32, strides=[256, 1]>,
+      sparse_dim=0
+    >
+
+    // (4) Gather along the second dimension (sparse_dim=1). Here the
+    // first index is a scalar selecting which block of 8 rows, and
+    // the second index is a 1D tile of 16 column indices.
+    //
+    !gsv_2d_col = !cuda_tile.gather_scatter_view<
+      tile=(8x16),
+      tensor_view<128x256xf32, strides=[256, 1]>,
+      sparse_dim=1
+    >
+
+    // (5) Scatter (store) using the same view type as example (2).
+    // Given a 4x4 tile to store and scatter_indices=[5, 1, 7, 3]
+    // with col_idx=0, row 0 of the tile is written to row 5 of the
+    // tensor_view, row 1 to row 1, row 2 to row 7, and row 3 to
+    // row 3. Columns 0-3 are written contiguously. The table below
+    // shows which tensor_view rows are written [*] and which are
+    // untouched ( ).
+    //
+    //                      8
+    //       ←─────────────────────────────→
+    //     ↑ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 0: untouched
+    //     │ [1] [1] [1] [1] ( ) ( ) ( ) ( )    row 1: ← tile row 1
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 2: untouched
+    //   8 │ [3] [3] [3] [3] ( ) ( ) ( ) ( )    row 3: ← tile row 3
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 4: untouched
+    //     │ [0] [0] [0] [0] ( ) ( ) ( ) ( )    row 5: ← tile row 0
+    //     │ ( ) ( ) ( ) ( ) ( ) ( ) ( ) ( )    row 6: untouched
+    //     ↓ [2] [2] [2] [2] ( ) ( ) ( ) ( )    row 7: ← tile row 2
+    //
+    // In pseudocode:
+    //   tensor_view[5, 0:4] = tile[0, :]
+    //   tensor_view[1, 0:4] = tile[1, :]
+    //   tensor_view[7, 0:4] = tile[2, :]
+    //   tensor_view[3, 0:4] = tile[3, :]
+    //
+    !gsv_2d_scatter = !cuda_tile.gather_scatter_view<
+      tile=(4x4),
+      tensor_view<8x8xf32, strides=[8, 1]>,
+      sparse_dim=0
+    >
+    ```
+
+    The gather/scatter view index space shape equals the shape of the
+    underlying :code:`tensor_view`. In the above examples, :code:`!gsv_1d`
+    has an index space shape of :code:`8`, :code:`!gsv_2d` has an index
+    space shape of :code:`8x8`, and :code:`!gsv_2d_padded` has an index
+    space shape of :code:`128x256`.
+
+    Indices accessing the :code:`gather_scatter_view` on non-sparse dimensions
+    must be in-bounds, though the accessed tile itself may run out-of-bounds.
+    Individual gather/scatter indices (at :code:`sparse_dim`) may reference
+    rows that are out-of-bounds of the underlying :code:`tensor_view`.
+    When tiles are partially out of bounds, operations follow the following
+    semantics:
+    * **Load operations**: If :code:`padding_value` is set, out-of-bounds
+      elements yield the padding value. If not set, out-of-bounds elements
+      yield unspecified values.
+    * **Store operations**: Out-of-bounds elements are masked during stores.
+
+    .. note::
+
+      Gather/Scatter sparse dimension indices do not need to be unique. Repeated
+      sparse index values in a load operation result in the same row being loaded
+      multiple times. Repeated sparse index values in a store operation result in
+      undefined values in the repeated row.
   }];
 
   let parameters = (ins
@@ -805,14 +960,16 @@ def CudaTile_BaseFloatTileType : CudaTile_TileOf<[
 def CudaTile_FloatTileType : CudaTile_TileOf<[
   CudaTile_Float16, CudaTile_BFloat16, CudaTile_Float32, CudaTile_Float64,
   CudaTile_TFloat32, CudaTile_Float8E4M3FN, CudaTile_Float8E5M2,
-  CudaTile_Float8E8M0FNU, CudaTile_Float4E2M1FN
+  CudaTile_Float8E8M0FNU, CudaTile_Float4E2M1FN,
+  CudaTile_Float8E5M3FNU
 ]>;
 
 def CudaTile_NumberTileType : CudaTile_TileOf<[
   CudaTile_Int1, CudaTile_Int8, CudaTile_Int16, CudaTile_Int32, CudaTile_Int64,
   CudaTile_Float16, CudaTile_BFloat16, CudaTile_Float32, CudaTile_Float64,
   CudaTile_TFloat32, CudaTile_Float8E4M3FN, CudaTile_Float8E5M2,
-  CudaTile_Float8E8M0FNU, CudaTile_Float4E2M1FN
+  CudaTile_Float8E8M0FNU, CudaTile_Float4E2M1FN,
+  CudaTile_Float8E5M3FNU
 ]>;
 
 def CudaTile_PointerTileType : CudaTile_TileOf<[CudaTile_PointerType]>;

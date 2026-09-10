@@ -3,11 +3,13 @@ add_mlir_library(CudaTileBytecodeTranslation
 
   DEPENDS
     CudaTileDialect
+    CudaTileBytecodeAnalysis
     CudaTileBytecodeCommon
     CudaTileBytecodeWriter
     CudaTileBytecodeReader
 
   LINK_LIBS PUBLIC
+    CudaTileBytecodeAnalysis
     CudaTileBytecodeCommon
     CudaTileBytecodeWriter
     CudaTileBytecodeReader

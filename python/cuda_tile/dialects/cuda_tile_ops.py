@@ -108,6 +108,14 @@ class Float4E2M1FN(_ElementType):
     _mlir_type_fn = staticmethod(lambda: _ods_ir.Float4E2M1FNType.get())
 
 
+try:
+
+    class Float8E5M3FNU(_ElementType):
+        _mlir_type_fn = staticmethod(lambda: _ods_ir.Float8E5M3FNUType.get())
+except AttributeError:
+    pass
+
+
 def _get_mlir_type(el_type):
     """Extract MLIR type from element type wrapper or return as-is if already MLIR type."""
     if hasattr(el_type, "mlir_type"):
@@ -251,6 +259,7 @@ class RoundingMode(Enum):
     APPROX = "approx"
     FULL = "full"
     NEAREST_INT_TO_ZERO = "nearest_int_to_zero"
+    NEAREST_AWAY = "nearest_away"
 
 
 class IntegerOverflow(Enum):
@@ -1342,9 +1351,9 @@ def _ensure_attr(value, type):
         if isinstance(type, _ods_ir.FloatType):
             return _ods_ir.FloatAttr.get(type, value)
         else:
-            assert isinstance(
-                type, _ods_ir.IntegerType
-            ), "expected integer or float type"
+            assert isinstance(type, _ods_ir.IntegerType), (
+                "expected integer or float type"
+            )
             return _ods_ir.IntegerAttr.get(type, value)
 
 
@@ -1355,9 +1364,9 @@ class _ConstantOp(_cuda_tile.ConstantOp):
     def __init__(self, ty, values, *, loc=None, ip=None):
         assert isinstance(ty, TileType), "expected tile type"
         el_ty = ty.element_type
-        assert isinstance(
-            el_ty, (_ods_ir.FloatType, _ods_ir.IntegerType)
-        ), "expected integer or float element type"
+        assert isinstance(el_ty, (_ods_ir.FloatType, _ods_ir.IntegerType)), (
+            "expected integer or float element type"
+        )
         attrs = [_ensure_attr(v, el_ty) for v in values]
         super().__init__(_ods_ir.DenseElementsAttr.get(attrs, ty), loc=loc, ip=ip)
 
@@ -1380,9 +1389,9 @@ class _GlobalOp(_cuda_tile.GlobalOp):
     ):
         assert isinstance(ty, TileType), "expected tile type"
         el_ty = ty.element_type
-        assert isinstance(
-            el_ty, (_ods_ir.FloatType, _ods_ir.IntegerType)
-        ), "expected integer or float element type"
+        assert isinstance(el_ty, (_ods_ir.FloatType, _ods_ir.IntegerType)), (
+            "expected integer or float element type"
+        )
         attrs = [_ensure_attr(v, el_ty) for v in values]
 
         # Build keyword arguments
@@ -1694,22 +1703,15 @@ def print_tko(str, args: Iterable[Tile], *, input_token=None, loc=None, ip=None)
     )
 
 
-@cuda_tile_op
-def printf(str, args: Iterable[Tile], *, loc=None, ip=None):
-    """Prints the provided string and arguments to the output."""
-    if not all(isinstance(arg, Tile) for arg in args):
-        raise TypeError(
-            "All elements in 'args' must be of type Tile. Constexpr cannot be printed direclty."
-        )
-    _cuda_tile.PrintOp(str, args, loc=loc, ip=ip)
-
-
-def _check_is_rhs_tile(lhs: Tile, rhs: Tile):
+def _check_is_rhs_tile(lhs: Tile, rhs: Tile, preserve_rhs_type=False):
     """
     To allow mixing of Python values and SSA values, we generate an MLIR value
-    using `constant` for the RHS, matching the type of the LHS tile.
-    This avoids the need for the user to explicitly wrap Python values with
-    `constant` when performing operations between tiles and Python scalars or lists.
+    using `constant` for the RHS, matching the shape of the LHS tile.
+
+    By default the element type is copied from the LHS. When preserve_rhs_type
+    is True, the element type is inferred from the Python value itself. This is
+    needed for ops like FPowI where the RHS type intentionally differs from the
+    LHS (e.g. float base, int exponent).
 
     Example:
         a = cuda_tile.tile
@@ -1719,6 +1721,8 @@ def _check_is_rhs_tile(lhs: Tile, rhs: Tile):
     Args:
         lhs (Tile): The left-hand side operand, which is a tile.
         rhs       : The right-hand side operand, which can be a Python value, list, or tile.
+        preserve_rhs_type (bool): If True, infer element type from the RHS value instead of
+                                  copying the LHS tile type.
 
     Returns:
         Tile: The right-hand side operand, converted to an MLIR tile if it was a Python value.
@@ -1729,6 +1733,8 @@ def _check_is_rhs_tile(lhs: Tile, rhs: Tile):
     if isinstance(rhs, Tile):
         return rhs
 
+    lhs_shape = list(lhs.tile_type.shape)
+
     if isinstance(rhs, list):
         try:
             rhs_shape, _ = _flatten_constants(rhs)
@@ -1736,13 +1742,20 @@ def _check_is_rhs_tile(lhs: Tile, rhs: Tile):
             raise AssertionError(
                 f"can not promote irregular rhs list ({rhs}) to tile: {e}"
             )
-        if rhs_shape != list(lhs.tile_type.shape):
+        if rhs_shape != lhs_shape:
             raise ValueError(
-                f"rhs list shape {rhs_shape} does not match lhs tile shape {list(lhs.tile_type.shape)}"
+                f"rhs list shape {rhs_shape} does not match lhs tile shape {lhs_shape}"
             )
+        if preserve_rhs_type:
+            return constant(rhs)
         return constant(rhs, tile_type=lhs.tile_type)
 
     if isinstance(rhs, Number):
+        if preserve_rhs_type:
+            return constant(
+                [rhs],
+                tile_type=make_tile_type(_infer_mlir_type_from_python(rhs), lhs_shape),
+            )
         return constant([rhs], tile_type=lhs.tile_type)
 
     raise TypeError(
@@ -1990,7 +2003,7 @@ def assume_same_elements(value: Tile, group_size: List[int], loc=None, ip=None) 
         # TODO: There are no Python bindings for cuda_tile.same_elements, so we
         # parse the textual representation as a workaround.
         return _ods_ir.Attribute.parse(
-            f'#cuda_tile.same_elements<[{", ".join([str(x) for x in group_size])}]>'
+            f"#cuda_tile.same_elements<[{', '.join([str(x) for x in group_size])}]>"
         )
 
     el_ty = value.element_type
@@ -2215,9 +2228,9 @@ def atomic_red_view_tko(
         raise TypeError(f"Expected TileView, got {type(view).__name__}")
     if not isinstance(value, Tile):
         raise TypeError(f"Expected Tile, got {type(value).__name__}")
-    assert isinstance(
-        mode, AtomicRMWMode
-    ), f"Expected AtomicRMWMode, got {type(mode).__name__}"
+    assert isinstance(mode, AtomicRMWMode), (
+        f"Expected AtomicRMWMode, got {type(mode).__name__}"
+    )
 
     if value.tile_type != view.view_tile_type:
         raise TypeError(
@@ -2430,9 +2443,38 @@ def ori(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
 @check_data_type_binary("lhs", _ods_ir.FloatType)
 @check_data_type_binary("rhs", _ods_ir.FloatType)
 @check_same_type
-def pow(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
-    """Raises lhs to the power of rhs element-wise."""
-    return return_results(_cuda_tile.PowOp(lhs, rhs, loc=loc, ip=ip))
+def fpowf(lhs: Tile, rhs: Tile, *, loc=None, ip=None) -> Tile:
+    """Raises lhs to the power of rhs element-wise (float base, float exponent)."""
+    return return_results(_cuda_tile.FPowFOp(lhs, rhs, loc=loc, ip=ip))
+
+
+@cuda_tile_op
+@check_data_type_binary("lhs", _ods_ir.FloatType)
+def fpowi(lhs: Tile, rhs, *, loc=None, ip=None) -> Tile:
+    """Raises lhs to the power of rhs element-wise (float base, signed integer exponent)."""
+    if not isinstance(rhs, Tile):
+        rhs = _check_is_rhs_tile(lhs, rhs, preserve_rhs_type=True)
+    if not isinstance(rhs.element_type, _ods_ir.IntegerType):
+        raise TypeError("expected rhs to have element type IntegerType")
+    if lhs.shape != rhs.shape:
+        raise TypeError("expected matching lhs/rhs tile shapes")
+    if rhs.element_type.width == 64:
+        raise TypeError("i64 exponent is not supported for fpowi; use i8, i16, or i32")
+    return return_results(_cuda_tile.FPowIOp(lhs, rhs, loc=loc, ip=ip))
+
+
+@cuda_tile_op
+@check_data_type_binary("lhs", _ods_ir.FloatType)
+def pow(lhs: Tile, rhs, *, loc=None, ip=None) -> Tile:
+    """Raises lhs to the power of rhs element-wise. Dispatches to fpowf or fpowi."""
+    if not isinstance(rhs, Tile):
+        rhs = _check_is_rhs_tile(lhs, rhs, preserve_rhs_type=True)
+    if isinstance(rhs.element_type, _ods_ir.FloatType):
+        return fpowf(lhs, rhs, loc=loc, ip=ip)
+    elif isinstance(rhs.element_type, _ods_ir.IntegerType):
+        return fpowi(lhs, rhs, loc=loc, ip=ip)
+    else:
+        raise TypeError("expected rhs to have element type FloatType or IntegerType")
 
 
 @cuda_tile_op
@@ -3007,6 +3049,55 @@ def extract(result, source, indices, *, loc=None, ip=None) -> Tile:
 
 
 @cuda_tile_op
+def insert(source, destination, indices, *, loc=None, ip=None) -> Tile:
+    """Inserts a source subtile into a destination tile at the specified indices."""
+    source_shape = source.tile_type.shape
+    dest_shape = destination.tile_type.shape
+
+    if source.element_type != destination.element_type:
+        raise ValueError(
+            "Expected source and destination to have the same element type."
+        )
+
+    if len(source_shape) != len(dest_shape):
+        raise ValueError("Expected source and destination to have the same rank.")
+
+    source_rank = len(source_shape)
+    if len(indices) != source_rank:
+        raise ValueError(f"Expected {source_rank} indices, but got {len(indices)}")
+
+    for i, (src_dim, dst_dim) in enumerate(zip(source_shape, dest_shape)):
+        if dst_dim % src_dim != 0:
+            raise ValueError(
+                f"Destination dimension {i} size ({dst_dim}) must be evenly divisible by "
+                f"source dimension {i} size ({src_dim})"
+            )
+
+    for i, index in enumerate(indices):
+        if not isinstance(index, Tile):
+            raise TypeError(f"Index {i} must be a Tile, got {type(index).__name__}")
+
+        index_shape = index.tile_type.shape
+        if len(index_shape) != 0:
+            raise ValueError(
+                f"Index {i} must be a scalar tile, got rank {len(index_shape)}"
+            )
+
+        if index.element_type != _ods_ir.IntegerType.get_signless(32):
+            raise ValueError(f"Index {i} must have i32 element type")
+
+    return return_results(
+        _cuda_tile.InsertOp(
+            source=source,
+            destination=destination,
+            indices=indices,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@cuda_tile_op
 def get_tile_block_id(*, loc=None, ip=None) -> Tile:
     """Get the ID of the current tile block."""
     return return_results(_cuda_tile.GetTileBlockIdOp(loc=loc, ip=ip))
@@ -3160,8 +3251,7 @@ def load_ptr_tko(
     elif latency != None:
         # (arch == None) and hint values are specified
         raise ValueError(
-            "Expected arch to be specified for OptimizationHint:"
-            f" latency = {latency}"
+            f"Expected arch to be specified for OptimizationHint: latency = {latency}"
         )
 
     # Create the load_ptr_tko operation, which returns both a tile and a token
@@ -3257,6 +3347,8 @@ def load_view_tko(
             f" allow_tma = {allow_tma}, latency = {latency}"
         )
 
+    inbounds_attr = _ods_ir.DenseBoolArrayAttr.get([False] * len(index_tiles))
+
     load_op = _cuda_tile.LoadViewTkoOp(
         tile=view.view_tile_type,
         result_token=result_token_type,
@@ -3266,6 +3358,7 @@ def load_view_tko(
         index=index_tiles,
         token=input_token,
         optimization_hints=optimization_hints,
+        inbounds=inbounds_attr,
         loc=loc,
         ip=ip,
     )
@@ -3301,13 +3394,8 @@ def permute(source: Tile, permutation, *, loc=None, ip=None) -> Tile:
                 f"permutation element at index {idx} '{perm}' is out of bounds [0, {rank})"
             )
 
-    # Compute result type and create op.
-    result_shape = [src_shape[i] for i in permutation]
-    result_type = TileType.get(result_shape, source.element_type)
     return return_results(
-        _cuda_tile.PermuteOp(
-            result=result_type, source=source, permutation=permutation, loc=loc, ip=ip
-        )
+        _cuda_tile.PermuteOp(source=source, permutation=permutation, loc=loc, ip=ip)
     )
 
 
@@ -3322,6 +3410,26 @@ def reshape(shape: List[int], source: Tile, *, loc=None, ip=None) -> Tile:
 @cuda_tile_op
 def make_token(*, loc=None, ip=None) -> Token:
     return return_results(_cuda_tile.MakeTokenOp(loc=loc, ip=ip))
+
+
+@cuda_tile_op
+def memory_fence_alias_tko(input_token: Token, *, loc=None, ip=None) -> Token:
+    """Token-ordered proxy alias fence.
+
+    Along the token chain, this fence orders all earlier target memory
+    operations that access virtually aliased memory before the fence and
+    requires their completion before operations consume the result token.
+    """
+    if not isinstance(input_token, Token):
+        raise TypeError("input_token must be a Token")
+
+    return return_results(
+        _cuda_tile.MemoryFenceAliasTkoOp(
+            token=input_token,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 @cuda_tile_op
@@ -3449,8 +3557,7 @@ def store_ptr_tko(
     elif latency != None:
         # (arch == None) and hint values are specified
         raise ValueError(
-            "Expected arch to be specified for OptimizationHint:"
-            f" latency = {latency}"
+            f"Expected arch to be specified for OptimizationHint: latency = {latency}"
         )
 
     return return_results(
@@ -3541,6 +3648,8 @@ def store_view_tko(
             f" allow_tma = {allow_tma}, latency = {latency}"
         )
 
+    inbounds_attr = _ods_ir.DenseBoolArrayAttr.get([False] * len(index_tiles))
+
     store_op = _cuda_tile.StoreViewTkoOp(
         memory_ordering_semantics=sem_attr,
         memory_scope=scope_attr,
@@ -3549,6 +3658,7 @@ def store_view_tko(
         index=index_tiles,
         token=input_token,
         optimization_hints=optimization_hints,
+        inbounds=inbounds_attr,
         loc=loc,
         ip=ip,
     )
@@ -3574,6 +3684,127 @@ def select(condition, trueval, falseval, *, loc=None, ip=None) -> Tile:
     )
 
 
+# Modes accepted by the FToFOp `OnlyVariants` constraint. Anything outside
+# this set (e.g. APPROX, FULL) is always invalid for ftof.
+_FTOF_VALID_MODES = (
+    RoundingMode.NEAREST_EVEN,
+    RoundingMode.ZERO,
+    RoundingMode.NEGATIVE_INF,
+    RoundingMode.POSITIVE_INF,
+    RoundingMode.NEAREST_AWAY,
+)
+
+
+def _is_ftof_low_precision_float_type(ty) -> bool:
+    """Return whether a float type is narrower than f16."""
+    return ty.width < 16
+
+
+def _get_ftof_float_semantics(ty):
+    """Return float semantics for known ftof types.
+
+    The tuple is (mantissa_bits, min_exponent, max_exponent).  The ftof
+    strict-widening check uses these values to prove that the destination can
+    exactly represent every source value.  Returning None means the type is not
+    known here, so validation must not use the strict-widening rule.
+    """
+    semantics = (
+        (Float4E2M1FN.mlir_type, (2, -1, 2)),
+        (Float8E4M3FN.mlir_type, (4, -6, 8)),
+        (Float8E4M3FNUZ.mlir_type, (4, -7, 8)),
+        (Float8E5M2.mlir_type, (3, -14, 15)),
+        (Float8E8M0FNU.mlir_type, (1, -127, 127)),
+        (Float16.mlir_type, (11, -14, 15)),
+        (BFloat16.mlir_type, (8, -126, 127)),
+        (TFloat32.mlir_type, (11, -126, 127)),
+        (Float32.mlir_type, (24, -126, 127)),
+        (Float64.mlir_type, (53, -1022, 1023)),
+    )
+    f8e5m3fnu = globals().get("Float8E5M3FNU")
+    if f8e5m3fnu is not None:
+        semantics += ((f8e5m3fnu.mlir_type, (4, -15, 16)),)
+
+    for float_ty, float_semantics in semantics:
+        if ty == float_ty:
+            return float_semantics
+    return None
+
+
+def _is_ftof_strict_widening(src_ty, dst_ty) -> bool:
+    """Return whether ftof can ignore rounding for this widening pair."""
+    src_semantics = _get_ftof_float_semantics(src_ty)
+    dst_semantics = _get_ftof_float_semantics(dst_ty)
+    if src_semantics is None or dst_semantics is None:
+        return False
+
+    src_precision, src_min_exp, src_max_exp = src_semantics
+    dst_precision, dst_min_exp, dst_max_exp = dst_semantics
+    return (
+        dst_precision >= src_precision
+        and dst_min_exp <= src_min_exp
+        and dst_max_exp >= src_max_exp
+    )
+
+
+def _validate_ftof_rounding_mode(src_ty, dst_ty, mode: RoundingMode) -> None:
+    """Mirror the FToFOp verifier's ordered rounding-mode rules."""
+    if mode not in _FTOF_VALID_MODES:
+        names = ", ".join(repr(m.value) for m in _FTOF_VALID_MODES)
+        raise ValueError(
+            f"invalid rounding mode {mode.value!r} for ftof; supported: {names}"
+        )
+
+    if isinstance(dst_ty, _ods_ir.Float8E8M0FNUType):
+        if mode not in (RoundingMode.ZERO, RoundingMode.POSITIVE_INF):
+            raise ValueError(
+                f"invalid rounding mode {mode.value!r} for ftof to f8E8M0FNU; "
+                f"supported: 'zero', 'positive_inf'"
+            )
+        return
+
+    if _is_ftof_low_precision_float_type(dst_ty):
+        if mode != RoundingMode.NEAREST_EVEN:
+            raise ValueError(
+                f"invalid rounding mode {mode.value!r} for ftof to "
+                f"low-precision type; supported: 'nearest_even'"
+            )
+        return
+
+    if _is_ftof_strict_widening(src_ty, dst_ty):
+        return
+
+    if src_ty == Float64.mlir_type and dst_ty == Float32.mlir_type:
+        if mode not in (
+            RoundingMode.NEAREST_EVEN,
+            RoundingMode.ZERO,
+            RoundingMode.NEGATIVE_INF,
+            RoundingMode.POSITIVE_INF,
+        ):
+            raise ValueError(
+                f"invalid rounding mode {mode.value!r} for ftof from f64 to f32; "
+                f"supported: 'nearest_even', 'zero', 'negative_inf', 'positive_inf'"
+            )
+        return
+
+    if src_ty == Float32.mlir_type and dst_ty == TFloat32.mlir_type:
+        if mode not in (
+            RoundingMode.NEAREST_EVEN,
+            RoundingMode.ZERO,
+            RoundingMode.NEAREST_AWAY,
+        ):
+            raise ValueError(
+                f"invalid rounding mode {mode.value!r} for ftof from f32 to tf32; "
+                f"supported: 'nearest_even', 'zero', 'nearest_away'"
+            )
+        return
+
+    if mode not in (RoundingMode.NEAREST_EVEN, RoundingMode.ZERO):
+        raise ValueError(
+            f"invalid rounding mode {mode.value!r} for ftof narrowing conversion; "
+            f"supported: 'nearest_even', 'zero'"
+        )
+
+
 @cuda_tile_op
 def ftof(
     el_type,
@@ -3594,16 +3825,7 @@ def ftof(
     if src_el_type == el_type.mlir_type:
         raise TypeError(f"source and destination types are identical: {src_el_type}")
 
-    if el_type.mlir_type == Float8E8M0FNU.mlir_type:
-        if rounding_mode not in [RoundingMode.ZERO, RoundingMode.POSITIVE_INF]:
-            raise ValueError(
-                f"Invalid rounding mode for ftof to f8E8M0FNU: {rounding_mode}, expected ZERO or POSITIVE_INF"
-            )
-    else:
-        if rounding_mode != RoundingMode.NEAREST_EVEN:
-            raise ValueError(
-                f"Invalid rounding mode for ftof: {rounding_mode}, expected NEAREST_EVEN"
-            )
+    _validate_ftof_rounding_mode(src_el_type, el_type.mlir_type, rounding_mode)
     result_type = make_tile_type(el_type, from_.tile_type.shape)
     return return_results(
         _cuda_tile.FToFOp(
@@ -3618,7 +3840,13 @@ def ftof(
 
 @cuda_tile_op
 def ftoi(
-    el_type, from_, *, signedness: Signedness = Signedness.SIGNED, loc=None, ip=None
+    el_type,
+    from_,
+    *,
+    signedness: Signedness = Signedness.SIGNED,
+    saturating: bool = False,
+    loc=None,
+    ip=None,
 ) -> Tile:
     if not isinstance(el_type, type) or not isinstance(
         el_type.mlir_type, _ods_ir.IntegerType
@@ -3637,6 +3865,7 @@ def ftoi(
             from_=from_,
             signedness=get_signedness_attr(signedness),
             rounding_mode=get_rounding_mode_attr(RoundingMode.NEAREST_INT_TO_ZERO),
+            saturating=saturating,
             loc=loc,
             ip=ip,
         )
@@ -4577,14 +4806,14 @@ def _flatten_constants(value):
             else:
                 shape.append(len(val))
                 if isinstance(val[0], list):
-                    assert all(
-                        isinstance(v, list) for v in val
-                    ), "inconsistent nesting level"
+                    assert all(isinstance(v, list) for v in val), (
+                        "inconsistent nesting level"
+                    )
                     compute_shape(val[0])
                 else:
-                    assert not any(
-                        isinstance(v, list) for v in val
-                    ), "inconsistent nesting level"
+                    assert not any(isinstance(v, list) for v in val), (
+                        "inconsistent nesting level"
+                    )
 
         compute_shape(value)
 
@@ -4600,9 +4829,9 @@ def _flatten_constants(value):
 
         flatten(value, 0)
     else:
-        assert isinstance(value, int) or isinstance(
-            value, float
-        ), "expected int or float"
+        assert isinstance(value, int) or isinstance(value, float), (
+            "expected int or float"
+        )
         flattened_values = [value]
     assert len(flattened_values) > 0, "empty tiles are not allowed"
     return shape, flattened_values
@@ -4691,9 +4920,9 @@ def global_(
     current_op = current_ip.block.owner
     while current_op and current_op.name != "cuda_tile.module":
         current_op = current_op.parent
-    assert (
-        current_op and current_op.name == "cuda_tile.module"
-    ), "could not find enclosing module"
+    assert current_op and current_op.name == "cuda_tile.module", (
+        "could not find enclosing module"
+    )
 
     if tile_type is not None and isinstance(tile_type, TileType) is False:
         issue = f'tile_type must be "TileType" type but it is {tile_type}'
@@ -5031,7 +5260,6 @@ class ModuleOp(_cuda_tile.ModuleOp):
 
 
 class EntryContext:
-
     def __init__(self, kernel_name, loc, arg_types):
         self.arg_types = arg_types
         func_type = _ods_ir.TypeAttr.get(_ods_ir.FunctionType.get(arg_types, []))
@@ -5119,3 +5347,29 @@ class TileIrGenerator:
         self.module.operation.print(enable_debug_info=enable_location)
 
 
+@cuda_tile_op
+def gdc_launch_dependents_tko(*, input_token=None, loc=None, ip=None) -> Token:
+    """Signal dependent kernels can be scheduled (PDL).
+
+    Emits ``gdc_launch_dependents_tko``.  Every CTA must execute this
+    (or complete via EXIT) before the dependent kernel is scheduled.
+    On SM<90 this is a no-op.
+    """
+    if input_token is not None and not isinstance(input_token, Token):
+        raise TypeError("input_token must be a Token")
+    return return_results(
+        _cuda_tile.GdcLaunchDependentsTkoOp(token=input_token, loc=loc, ip=ip)
+    )
+
+
+@cuda_tile_op
+def gdc_wait_tko(*, input_token=None, loc=None, ip=None) -> Token:
+    """Wait for predecessor kernel completion (PDL).
+
+    Emits ``gdc_wait_tko``.  Acquire semantics: stores from the
+    predecessor kernel are visible after this completes.
+    On SM<90 this is a no-op.
+    """
+    if input_token is not None and not isinstance(input_token, Token):
+        raise TypeError("input_token must be a Token")
+    return return_results(_cuda_tile.GdcWaitTkoOp(token=input_token, loc=loc, ip=ip))

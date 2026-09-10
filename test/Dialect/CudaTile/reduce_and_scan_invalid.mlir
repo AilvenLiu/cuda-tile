@@ -460,7 +460,7 @@ cuda_tile.module @kernels {
       %2 = mulf %arg0, %arg1  : tile<f32>
       %3 = mulf %arg2, %arg3  : tile<f32>
       %4 = mulf %arg4, %arg5  : tile<f32>
-      // expected-error @below{{'cuda_tile.print_tko' op only pure operations are allowed inside 'cuda_tile.reduce'}}
+      // expected-error @below{{'cuda_tile.print_tko' op only memory-effect-free operations are allowed inside 'cuda_tile.reduce'}}
       %5 = print_tko "reduce_step" -> token
       yield %2, %3, %4 : tile<f32>, tile<f32>, tile<f32>
     }
@@ -481,7 +481,7 @@ cuda_tile.module @kernels {
       %2 = mulf %arg0, %arg1  : tile<f32>
       %3 = mulf %arg2, %arg3  : tile<f32>
       %4 = mulf %arg4, %arg5  : tile<f32>
-      // expected-error @below{{'cuda_tile.print_tko' op only pure operations are allowed inside 'cuda_tile.scan'}}
+      // expected-error @below{{'cuda_tile.print_tko' op only memory-effect-free operations are allowed inside 'cuda_tile.scan'}}
       %5 = print_tko "scan_step" -> token
       yield %2, %3, %4 : tile<f32>, tile<f32>, tile<f32>
     }

@@ -265,7 +265,7 @@ cuda_tile.module @module {
 
 cuda_tile.module @module {
   cuda_tile.testing$func @make_tensor_view_invalid_element_type(%base: !cuda_tile.tile<!cuda_tile.ptr<f32>>) {
-    // expected-error-re @below{{failed to verify 'elementType': f16 or bf16 or f32 or tf32 or f64 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN or i1 or i8 or i16 or i32 or i64}}
+    // expected-error-re @below{{failed to verify 'elementType': f16 or bf16 or f32 or tf32 or f64 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN{{( or f8E5M3FNU)?}} or i1 or i8 or i16 or i32 or i64}}
     cuda_tile.make_tensor_view %arg0, shape = [32, 32], strides = [32, 1] : tensor_view<32x32xptr<f32>, strides=[32,1]>
   }
 }
@@ -434,7 +434,7 @@ cuda_tile.module @module {
   cuda_tile.testing$func @tile_partition_wrong_load_rank(%view: !cuda_tile.partition_view<tile=(1024x1024), !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>) {
     %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     // expected-error @below{{expected 2 index operands (based on view type), got 1}}
-    "cuda_tile.load_view_tko"(%view, %c0) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 0>}> : (!cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
+    "cuda_tile.load_view_tko"(%view, %c0) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 0>}> : (!cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
   }
 }
 
@@ -456,7 +456,7 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     %c0_i64 = cuda_tile.constant <i64: 0> : !cuda_tile.tile<i64>
     // expected-error @below{{expected index type 1 to be the same as other index types ('!cuda_tile.tile<i32>'), got '!cuda_tile.tile<i64>'}}
-    %x, %t = "cuda_tile.load_view_tko"(%view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 2, 0>}> : (!cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
+    %x, %t = "cuda_tile.load_view_tko"(%view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 2, 0>}> : (!cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
   }
 }
 
@@ -497,7 +497,7 @@ cuda_tile.module @module {
   cuda_tile.testing$func @tile_strided_wrong_load_rank(%view: !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>) {
     %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     // expected-error @below{{expected 2 index operands (based on view type), got 1}}
-    "cuda_tile.load_view_tko"(%view, %c0) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 0>}> : (!cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
+    "cuda_tile.load_view_tko"(%view, %c0) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 0>}> : (!cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
   }
 }
 
@@ -508,7 +508,7 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     %c0_i64 = cuda_tile.constant <i64: 0> : !cuda_tile.tile<i64>
     // expected-error @below{{expected index type 1 to be the same as other index types ('!cuda_tile.tile<i32>'), got '!cuda_tile.tile<i64>'}}
-    %x, %t = "cuda_tile.load_view_tko"(%view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 2, 0>}> : (!cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
+    %x, %t = "cuda_tile.load_view_tko"(%view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 2, 0>}> : (!cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.token)
   }
 }
 
@@ -531,7 +531,7 @@ cuda_tile.module @module {
   cuda_tile.testing$func @tile_partition_wrong_store_rank(%view: !cuda_tile.partition_view<tile=(1024x1024), !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>, %tile: !cuda_tile.tile<1024x1024xf32>) {
     %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     // expected-error @below{{expected 2 index operands (based on view type), got 1}}
-    "cuda_tile.store_view_tko"(%tile, %view, %c0) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 1, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> !cuda_tile.token
+    "cuda_tile.store_view_tko"(%tile, %view, %c0) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 1, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> !cuda_tile.token
   }
 }
 
@@ -552,7 +552,7 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     %c0_i64 = cuda_tile.constant <i64: 0> : !cuda_tile.tile<i64>
     // expected-error @below{{expected index type 1 to be the same as other index types ('!cuda_tile.tile<i32>'), got '!cuda_tile.tile<i64>'}}
-    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> !cuda_tile.token
+    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> !cuda_tile.token
   }
 }
 
@@ -563,7 +563,7 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<1xi32>
     %c0_i64 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<1xi32>
     // expected-error @+1{{expected index type to be a scalar tile, got '!cuda_tile.tile<1xi32>'}}
-    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<1xi32>, !cuda_tile.tile<1xi32>) -> !cuda_tile.token
+    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<1xi32>, !cuda_tile.tile<1xi32>) -> !cuda_tile.token
   }
 }
 
@@ -574,7 +574,7 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<1xi32>
     %c0_i64 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<1xi32>
     // expected-error @+1{{expected index type to be a scalar tile, got '!cuda_tile.tile<1xi32>'}}
-    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<1xi32>, !cuda_tile.tile<1xi32>) -> !cuda_tile.token
+    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<1xi32>, !cuda_tile.tile<1xi32>) -> !cuda_tile.token
   }
 }
 
@@ -595,7 +595,7 @@ cuda_tile.module @module {
   cuda_tile.testing$func @tile_strided_wrong_store_rank(%view: !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>, %tile: !cuda_tile.tile<1024x1024xf32>) {
     %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     // expected-error @below{{expected 2 index operands (based on view type), got 1}}
-    "cuda_tile.store_view_tko"(%tile, %view, %c0) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 1, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> !cuda_tile.token
+    "cuda_tile.store_view_tko"(%tile, %view, %c0) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 1, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>) -> !cuda_tile.token
   }
 }
 
@@ -606,6 +606,89 @@ cuda_tile.module @module {
     %c0_i32 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
     %c0_i64 = cuda_tile.constant <i64: 0> : !cuda_tile.tile<i64>
     // expected-error @below{{expected index type 1 to be the same as other index types ('!cuda_tile.tile<i32>'), got '!cuda_tile.tile<i64>'}}
-    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> !cuda_tile.token
+    %t = "cuda_tile.store_view_tko"(%tile, %view, %c0_i32, %c0_i64) <{memory_ordering_semantics = 0 : i32, inbounds = array<i1: false, false>, operandSegmentSizes = array<i32: 1, 1, 2, 0>}> : (!cuda_tile.tile<1024x1024xf32>, !cuda_tile.strided_view<tile=(1024x1024), traversal_strides=[1024,1], tensor_view<4096x4096xf32, strides=[4096,1]>>, !cuda_tile.tile<i32>, !cuda_tile.tile<i64>) -> !cuda_tile.token
+  }
+}
+
+// -----
+
+cuda_tile.module @module {
+  cuda_tile.testing$func @load_view_tko_inbounds_size_mismatch(%view: !cuda_tile.partition_view<tile=(1024x1024), !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{inbounds size (3) must match the number of index dimensions (2)}}
+    %x, %t = load_view_tko weak %view[%c0, %c0] inbounds = [true, false, true] : partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, tile<i32> -> tile<1024x1024xf32>, token
+  }
+}
+
+// -----
+
+cuda_tile.module @module {
+  cuda_tile.testing$func @store_view_tko_inbounds_size_mismatch(%view: !cuda_tile.partition_view<tile=(1024x1024), !cuda_tile.tensor_view<4096x4096xf32, strides=[4096,1]>>, %tile: !cuda_tile.tile<1024x1024xf32>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{inbounds size (3) must match the number of index dimensions (2)}}
+    %t = store_view_tko weak %tile, %view[%c0, %c0] inbounds = [true, false, true] : tile<1024x1024xf32>, partition_view<tile=(1024x1024), tensor_view<4096x4096xf32, strides=[4096,1]>>, tile<i32> -> token
+  }
+}
+
+// -----
+
+// `load_view_tko` with a non-empty `[ ... ]` index list but no index types.
+cuda_tile.module @module {
+  cuda_tile.testing$func @load_view_tko_missing_index_types(%view: !cuda_tile.partition_view<tile=(8), !cuda_tile.tensor_view<128xf32, strides=[1]>>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{index types must be specified when indices are present}}
+    %t, %tok = load_view_tko weak %view[%c0] : partition_view<tile=(8), tensor_view<128xf32, strides=[1]>> -> tile<8xf32>, token
+  }
+}
+
+// -----
+
+// `store_view_tko` with a non-empty `[ ... ]` index list but no index types.
+cuda_tile.module @module {
+  cuda_tile.testing$func @store_view_tko_missing_index_types(%view: !cuda_tile.partition_view<tile=(8), !cuda_tile.tensor_view<128xf32, strides=[1]>>, %tile: !cuda_tile.tile<8xf32>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{index types must be specified when indices are present}}
+    %t = store_view_tko weak %tile, %view[%c0] : tile<8xf32>, partition_view<tile=(8), tensor_view<128xf32, strides=[1]>> -> token
+  }
+}
+
+// -----
+
+// `load_view_tko` cannot smuggle `inbounds` through the trailing `attributes`
+// dict: it is printed explicitly via `inbounds = [...]` and must use that
+// canonical syntax.
+cuda_tile.module @module {
+  cuda_tile.testing$func @load_view_tko_reserved_inbounds_via_attr_dict(%view: !cuda_tile.partition_view<tile=(8), !cuda_tile.tensor_view<128xf32, strides=[1]>>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{attribute 'inbounds' is reserved and may not appear in the trailing `attributes { ... }` dict}}
+    %t, %tok = load_view_tko weak %view[%c0] attributes {inbounds = array<i1: true>} : partition_view<tile=(8), tensor_view<128xf32, strides=[1]>>, tile<i32> -> tile<8xf32>, token
+  }
+}
+
+// -----
+
+// `store_view_tko` cannot smuggle `memory_ordering_semantics` through the
+// trailing `attributes` dict: it is printed explicitly as the leading keyword
+// (e.g. `weak`/`relaxed`).
+cuda_tile.module @module {
+  cuda_tile.testing$func @store_view_tko_reserved_memory_ordering_via_attr_dict(%view: !cuda_tile.partition_view<tile=(8), !cuda_tile.tensor_view<128xf32, strides=[1]>>, %tile: !cuda_tile.tile<8xf32>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{attribute 'memory_ordering_semantics' is reserved and may not appear in the trailing `attributes { ... }` dict}}
+    %t = store_view_tko weak %tile, %view[%c0] attributes {memory_ordering_semantics = 0 : i32} : tile<8xf32>, partition_view<tile=(8), tensor_view<128xf32, strides=[1]>>, tile<i32> -> token
+  }
+}
+
+// -----
+
+// `atomic_red_view_tko` cannot smuggle `mode` through the trailing `attributes`
+// dict: it is printed explicitly between the index list and the value operand.
+cuda_tile.module @module {
+  cuda_tile.testing$func @atomic_red_view_tko_reserved_mode_via_attr_dict(
+      %view: !cuda_tile.partition_view<tile=(2x2), !cuda_tile.tensor_view<2x2xi32, strides=[2, 1]>>,
+      %value: !cuda_tile.tile<2x2xi32>) {
+    %c0 = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>
+    // expected-error @below{{attribute 'mode' is reserved and may not appear in the trailing `attributes { ... }` dict}}
+    %t = atomic_red_view_tko relaxed device %view[%c0, %c0], add, %value attributes {mode = 0 : i32}
+        : tile<2x2xi32>, partition_view<tile=(2x2), tensor_view<2x2xi32, strides=[2, 1]>>, tile<i32> -> token
   }
 }

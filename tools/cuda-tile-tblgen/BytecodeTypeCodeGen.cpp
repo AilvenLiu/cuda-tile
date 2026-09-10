@@ -71,6 +71,30 @@ static const char *const serializeTypeTemplate = R"(
 if (failed(writeTypeIndex({0}, writer)))
   return failure();
 )";
+static const char *const serializeTypeAttrTemplate = R"(
+if (failed(writeTypeIndex({0}.getValue(), writer)))
+  return failure();
+)";
+static const char *const serializeNestedAttrTemplate = R"(
+if (failed(writeSelfContainedTypeAttribute({0}, writer)))
+  return failure();
+)";
+/// Polymorphic nested-attr serialization template (self-contained encoding,
+/// used when the param's declared C++ type is an AttrInterface).
+/// {0}: getter call.
+static const char *const serializePolymorphicNestedAttrTemplate = R"(
+if (failed(writeSelfContainedTypeAttribute({0}, writer)))
+  return failure();
+)";
+/// Template for AttributeArray serialization on the type side.
+/// {0}: Getter call (size source), {1}: range expression to iterate.
+static const char *const serializeAttrArrayTemplate = R"(
+writer.writeVarInt({0}.size());
+for (Attribute elementAttr : {1}) {{
+  if (failed(writeSelfContainedTypeAttribute(elementAttr, writer)))
+    return failure();
+}
+)";
 /// Runtime template for OptionalEnum (includes both formats).
 /// {0}: Getter call, {1}: Enum type, {2}: Runtime flag variable
 static const char *const serializeOptionalEnumTemplate = R"(
@@ -113,6 +137,49 @@ if (failed(reader.readLEVarSize({0}_data)))
  return reader.emitError() << "failed to read {0} data";
 {0} = DenseI32ArrayAttr::get(&context, {0}_data);
 )";
+static const char *const readTypeAttrTemplate = R"(
+Type {0}_type = readAndGetType(reader);
+if (!{0}_type)
+  return reader.emitError() << "failed to get {0} type";
+{0} = TypeAttr::get({0}_type);
+)";
+static const char *const readNestedAttrTemplate = R"(
+if (failed(readNestedAttribute(reader, {0})))
+  return failure();
+)";
+/// Polymorphic nested-attr deserialization template. Reads a generic
+/// Attribute via tag dispatch then narrows to the declared interface type.
+/// {0}: variable name. {1}: declared C++ interface type.
+static const char *const readPolymorphicNestedAttrTemplate = R"(
+{
+  Attribute {0}_self_contained;
+  if (failed(readNestedAttribute(reader, {0}_self_contained)))
+    return failure();
+  {0} = ::llvm::dyn_cast<{1}>({0}_self_contained);
+  if (!{0})
+    return reader.emitError() << "expected attribute implementing '{1}' "
+                              << "for parameter '{0}', got "
+                              << {0}_self_contained;
+}
+)";
+/// Template for AttributeArray deserialization on the type side.
+/// Reads N self-contained attributes into an ArrayAttr stored in {0}.
+/// {0}: Variable name.
+static const char *const readAttrArrayTemplate = R"(
+uint64_t {0}_size;
+if (failed(reader.readVarInt({0}_size,
+                             std::numeric_limits<uint32_t>::max() - 1)))
+  return reader.emitError() << "failed to read {0} size";
+SmallVector<Attribute, 4> {0}_storage;
+{0}_storage.reserve({0}_size);
+for (uint64_t i = 0; i < {0}_size; ++i) {{
+  Attribute {0}_element;
+  if (failed(readNestedAttribute(reader, {0}_element)))
+    return reader.emitError() << "failed to read {0} element " << i;
+  {0}_storage.push_back({0}_element);
+}
+{0} = ArrayAttr::get(&context, {0}_storage);
+)";
 
 /// {0}: Variable name.
 static const char *const readGenericTypeTemplate = R"(
@@ -137,7 +204,10 @@ if ({1}) {{
   if (failed(parseGenericEnumAttr(reader, context, {0})))
     return failure();
 } else {{
-  if (reader.readLE<uint8_t>())
+  uint8_t presence;
+  if (failed(reader.readLE(presence)))
+    return reader.emitError() << "failed to read OptionalEnum presence flag";
+  if (presence)
     if (failed(parseGenericEnumAttr(reader, context, {0})))
       return failure();
 }
@@ -150,17 +220,43 @@ if ({1}) {{
 /// Get parameters in serialization order.
 static SmallVector<BytecodeTypeParameter, 4>
 getSerializationOrder(const CudaTileType &type) {
-  if (type.needsReverseOrder)
+  if (type.needsReverseOrder) {
     return llvm::to_vector<4>(llvm::reverse(type.parameters));
+  }
   return type.parameters;
+}
+
+static bool needsAttributeTypeRegistration(BytecodeTypeParameter::Kind kind) {
+  return kind == BytecodeTypeParameter::Kind::TypeAttr ||
+         kind == BytecodeTypeParameter::Kind::NestedAttr ||
+         kind == BytecodeTypeParameter::Kind::PolymorphicNestedAttr ||
+         kind == BytecodeTypeParameter::Kind::AttributeArray;
+}
+
+/// True for parameters whose value is an attribute that carries its own
+/// bytecode version, so it must be scored when computing a type's min version.
+static bool isAttributeVersionParameter(BytecodeTypeParameter::Kind kind) {
+  return kind == BytecodeTypeParameter::Kind::OptionalEnum ||
+         kind == BytecodeTypeParameter::Kind::NestedAttr ||
+         kind == BytecodeTypeParameter::Kind::PolymorphicNestedAttr ||
+         kind == BytecodeTypeParameter::Kind::AttributeArray;
+}
+
+static bool needsUnifiedBitfieldSerializationFlag(const CudaTileType &type) {
+  return llvm::any_of(
+      getSerializationOrder(type), [](const BytecodeTypeParameter &param) {
+        return param.kind == BytecodeTypeParameter::Kind::OptionalEnum;
+      });
 }
 
 /// Check if version string is >= 13.3 (unified bitfield format).
 /// Types introduced at 13.3+ always use unified format.
 static bool isUnifiedBitfieldVersion(StringRef version) {
   auto [majorStr, minorStr] = parseVersion(version);
-  int major = std::stoi(majorStr);
-  int minor = std::stoi(minorStr);
+  unsigned major, minor;
+  if (majorStr.getAsInteger(10, major) || minorStr.getAsInteger(10, minor)) {
+    PrintFatalError("invalid version string: " + version.str());
+  }
   return (major > 13) || (major == 13 && minor >= 3);
 }
 
@@ -200,8 +296,9 @@ void mlir::tblgen::generateTypeTagEnum(const BytecodeTypeStructure &structure,
      << "/// WARNING: NEVER CHANGE THESE VALUES - they must remain stable.\n"
      << "enum class TypeTag : uint8_t {\n";
   // Generate all type tags.
-  for (const auto &[enumName, tagValue] : structure.allTypeTags)
+  for (const auto &[enumName, tagValue] : structure.allTypeTags) {
     os << "  " << enumName << " = " << tagValue << ",\n";
+  }
   os << "};\n";
 }
 
@@ -214,9 +311,33 @@ static void generateParameterSerialization(const BytecodeTypeParameter &param,
                                            StringRef indent = "",
                                            StringRef runtimeFlag = "") {
   std::string getterCall = "type." + param.accessorName + "()";
+  std::string attributeArrayRange =
+      (param.cppType.find("ArrayAttr") != std::string::npos ||
+       param.cppStorageType.find("ArrayAttr") != std::string::npos)
+          ? getterCall + ".getValue()"
+          : getterCall;
   mlir::raw_indented_ostream ios(os);
 
   switch (param.kind) {
+  case BytecodeTypeParameter::Kind::TypeAttr:
+    ios.printReindented(formatv(serializeTypeAttrTemplate, getterCall).str(),
+                        indent);
+    break;
+  case BytecodeTypeParameter::Kind::NestedAttr:
+    ios.printReindented(formatv(serializeNestedAttrTemplate, getterCall).str(),
+                        indent);
+    break;
+  case BytecodeTypeParameter::Kind::PolymorphicNestedAttr:
+    ios.printReindented(
+        formatv(serializePolymorphicNestedAttrTemplate, getterCall).str(),
+        indent);
+    break;
+  case BytecodeTypeParameter::Kind::AttributeArray:
+    ios.printReindented(
+        formatv(serializeAttrArrayTemplate, getterCall, attributeArrayRange)
+            .str(),
+        indent);
+    break;
   case BytecodeTypeParameter::Kind::Int64Array:
   case BytecodeTypeParameter::Kind::Int32Array:
     ios.printReindented(formatv(serializeArrayTemplate, getterCall).str(),
@@ -258,44 +379,81 @@ static void generateParameterDeserialization(const BytecodeTypeParameter &param,
   mlir::raw_indented_ostream ios(os);
 
   switch (param.kind) {
+  case BytecodeTypeParameter::Kind::TypeAttr:
+    if (declareVariable) {
+      os << indent << formatv("TypeAttr {0};\n", param.name);
+    }
+    ios.printReindented(formatv(readTypeAttrTemplate, param.name).str(),
+                        indent);
+    break;
+  case BytecodeTypeParameter::Kind::NestedAttr:
+    if (declareVariable) {
+      os << indent << formatv("Attribute {0};\n", param.name);
+    }
+    ios.printReindented(formatv(readNestedAttrTemplate, param.name).str(),
+                        indent);
+    break;
+  case BytecodeTypeParameter::Kind::PolymorphicNestedAttr:
+    if (declareVariable) {
+      os << indent << formatv("{0} {1};\n", param.cppType, param.name);
+    }
+    ios.printReindented(
+        formatv(readPolymorphicNestedAttrTemplate, param.name, param.cppType)
+            .str(),
+        indent);
+    break;
+  case BytecodeTypeParameter::Kind::AttributeArray:
+    if (declareVariable) {
+      os << indent << formatv("ArrayAttr {0};\n", param.name);
+    }
+    ios.printReindented(formatv(readAttrArrayTemplate, param.name).str(),
+                        indent);
+    break;
   case BytecodeTypeParameter::Kind::Int64Array:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("SmallVector<int64_t, 4> {0};\n", param.name);
+    }
     ios.printReindented(formatv(readArrayTemplate, param.name).str(), indent);
     break;
   case BytecodeTypeParameter::Kind::Int32Array:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("SmallVector<int32_t, 4> {0};\n", param.name);
+    }
     ios.printReindented(formatv(readArrayTemplate, param.name).str(), indent);
     break;
   case BytecodeTypeParameter::Kind::UInt32Scalar:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("uint32_t {0};\n", param.name);
+    }
     ios.printReindented(formatv(readUInt32ScalarTemplate, param.name).str(),
                         indent);
     break;
   case BytecodeTypeParameter::Kind::DenseI32Array:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("DenseI32ArrayAttr {0};\n", param.name);
+    }
     ios.printReindented(formatv(readDenseI32ArrayTemplate, param.name).str(),
                         indent);
     break;
   case BytecodeTypeParameter::Kind::GenericType:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("Type {0};\n", param.name);
+    }
     ios.printReindented(formatv(readGenericTypeTemplate, param.name).str(),
                         indent);
     break;
   case BytecodeTypeParameter::Kind::SpecificType:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("{0} {1};\n", param.cppType, param.name);
+    }
     ios.printReindented(
         formatv(readSpecificTypeTemplate, param.name, param.cppType).str(),
         indent);
     break;
   case BytecodeTypeParameter::Kind::OptionalEnum:
-    if (declareVariable)
+    if (declareVariable) {
       os << indent << formatv("{1} {0};\n", param.name, param.cppType);
+    }
     ios.printReindented(
         formatv(readOptionalEnumTemplate, param.name, runtimeFlag).str(),
         indent);
@@ -330,15 +488,19 @@ generateBuiltinTypeSerializers(const BytecodeTypeStructure &structure,
                 generateVersionCheck(4, bt.sinceVersion, bt.enumName),
                 bt.enumName)
             .str();
-    if (bt.isInteger())
+    if (bt.isInteger()) {
       intChecks += check;
-    if (bt.isFloat())
+    }
+    if (bt.isFloat()) {
       floatChecks += check;
+    }
   }
-  if (!intChecks.empty())
+  if (!intChecks.empty()) {
     os << formatv(integerSerializerTemplate, intChecks);
-  if (!floatChecks.empty())
+  }
+  if (!floatChecks.empty()) {
     os << formatv(floatSerializerTemplate, floatChecks);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -375,17 +537,22 @@ generateBuiltinTypeSerializers(const BytecodeTypeStructure &structure,
 /// Generates flags field serialization for optional type parameters.
 static void generateOptionalParamFlags(const CudaTileType &type,
                                        raw_ostream &os) {
-  if (!type.hasOptionalTypeParams)
+  if (!type.hasOptionalTypeParams) {
     return;
+  }
 
-  if (type.skipVersionCheck) {
-    os << R"(
+  if (needsUnifiedBitfieldSerializationFlag(type)) {
+    if (type.skipVersionCheck) {
+      os << R"(
   bool useUnifiedBitfield = true;
+  (void)useUnifiedBitfield;
 )";
-  } else {
-    os << R"(
+    } else {
+      os << R"(
   bool useUnifiedBitfield = config.bytecodeVersion >= BytecodeVersion::kUnifiedBitfieldVersion;
+  (void)useUnifiedBitfield;
 )";
+    }
   }
 
   os << R"(  uint64_t optionalFlags = 0;
@@ -460,8 +627,9 @@ static void generateCudaTileTypeSerializer(const CudaTileType &type,
   os << formatv(cudaTileSerializerSignatureTemplate, type.typeName,
                 type.qualifiedTypeName);
 
-  if (!type.skipVersionCheck)
+  if (!type.skipVersionCheck) {
     os << generateVersionCheck(2, type.sinceVersion, type.typeName);
+  }
 
   // Write type tag.
   os << "  writer.writeVarInt(Bytecode::TypeTag::" << type.typeName << ");\n";
@@ -474,9 +642,22 @@ static void generateCudaTileTypeSerializer(const CudaTileType &type,
     bool isEvolved =
         !type.skipVersionCheck && param.sinceVersion != type.sinceVersion;
 
-    // Original parameters - always serialize.
+    // Original parameters - always serialize. Gate optional params on
+    // their presence flag to avoid writing null values, except for
+    // OptionalEnum: its template emits the legacy presence byte itself
+    // (0 for absent, 1 for present), so wrapping it would elide the
+    // byte the pre-13.3 reader unconditionally consumes.
     if (!isEvolved) {
-      generateParameterSerialization(param, os, "  ", "useUnifiedBitfield");
+      bool isOptionalEnum =
+          param.kind == BytecodeTypeParameter::Kind::OptionalEnum;
+      if (param.usesOptionalTypeFlags && !isOptionalEnum) {
+        std::string getterCall = "type." + param.accessorName + "()";
+        os << formatv("  if ({0}) {{\n", getterCall);
+        generateParameterSerialization(param, os, "    ", "useUnifiedBitfield");
+        os << "  }\n";
+      } else {
+        generateParameterSerialization(param, os, "  ", "useUnifiedBitfield");
+      }
       continue;
     }
 
@@ -497,8 +678,11 @@ static void generateCudaTileTypeSerializer(const CudaTileType &type,
 )",
                   majorStr, minorStr);
 
-    // Serialize parameter.
-    if (param.usesOptionalTypeFlags) {
+    // Serialize parameter. OptionalEnum is special-cased as above: its
+    // template emits the legacy presence byte itself, so do not wrap.
+    bool isOptionalEnum =
+        param.kind == BytecodeTypeParameter::Kind::OptionalEnum;
+    if (param.usesOptionalTypeFlags && !isOptionalEnum) {
       os << formatv("    if ({0}) {{\n", getterCall);
       generateParameterSerialization(param, os, "      ", "useUnifiedBitfield");
       os << "    }\n";
@@ -523,8 +707,9 @@ void mlir::tblgen::generateTypeSerializers(
     const BytecodeTypeStructure &structure, raw_ostream &os) {
   emitSourceFileHeader("Generated Type Serialization Functions", os);
   generateBuiltinTypeSerializers(structure, os);
-  for (const auto &type : structure.cudaTileTypes)
+  for (const auto &type : structure.cudaTileTypes) {
     generateCudaTileTypeSerializer(type, os);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -557,13 +742,15 @@ generateBuiltinTypeDeserializers(const BytecodeTypeStructure &structure,
                                 bt.typeTagValue, versionCheck, typeCreation)
                             .str();
 
-    if (bt.isInteger())
+    if (bt.isInteger()) {
       intChecks += check;
-    if (bt.isFloat())
+    }
+    if (bt.isFloat()) {
       floatChecks += check;
+    }
   }
 
-  if (!intChecks.empty())
+  if (!intChecks.empty()) {
     os << formatv(R"(// Auto-generated integer type deserialization
 LogicalResult parseIntegerType(uint8_t typeTag, Type &result, MLIRContext &context,
                                const BytecodeVersion &fileVersion) {{
@@ -571,8 +758,9 @@ LogicalResult parseIntegerType(uint8_t typeTag, Type &result, MLIRContext &conte
   return ::emitError(UnknownLoc::get(&context)) << "invalid integer type tag: " << static_cast<int>(typeTag);
 })",
                   intChecks);
+  }
 
-  if (!floatChecks.empty())
+  if (!floatChecks.empty()) {
     os << formatv(R"(// Auto-generated float type deserialization
 LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context,
                              const BytecodeVersion &fileVersion) {{
@@ -580,6 +768,7 @@ LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context
   return ::emitError(UnknownLoc::get(&context)) << "unsupported float type tag: " << static_cast<int>(typeTag);
 })",
                   floatChecks);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -599,12 +788,14 @@ LogicalResult parseFloatType(uint8_t typeTag, Type &result, MLIRContext &context
 /// Generates flags field deserialization for optional type parameters.
 static void generateOptionalParamFlagsReader(const CudaTileType &type,
                                              raw_ostream &os) {
-  if (!type.hasOptionalTypeParams)
+  if (!type.hasOptionalTypeParams) {
     return;
+  }
 
   if (type.skipVersionCheck) {
     os << R"(
   bool useUnifiedBitfield = true;
+  (void)useUnifiedBitfield;
   uint64_t optionalFlags = 0;
   if (failed(reader.readVarInt(optionalFlags)))
     return reader.emitError() << "failed to read optional parameter flags";
@@ -619,6 +810,7 @@ static void generateOptionalParamFlagsReader(const CudaTileType &type,
       // Type >= 13.3: useUnifiedBitfield is always true.
       os << formatv(R"(
   bool useUnifiedBitfield = true;
+  (void)useUnifiedBitfield;
   uint64_t optionalFlags = 0;
   if (fileVersion >= *BytecodeVersion::fromVersion({0}, {1}, 0)) {{
     if (failed(reader.readVarInt(optionalFlags)))
@@ -630,6 +822,7 @@ static void generateOptionalParamFlagsReader(const CudaTileType &type,
       // Type < 13.3: need runtime check for unified format.
       os << R"(
   bool useUnifiedBitfield = fileVersion >= BytecodeVersion::kUnifiedBitfieldVersion;
+  (void)useUnifiedBitfield;
 )";
       os << formatv(R"(
   uint64_t optionalFlags = 0;
@@ -661,9 +854,10 @@ LogicalResult parse{0}(EncodingReader &reader, Type &result) {{
                 type.typeName);
 
   // Version check for the type itself.
-  if (!type.skipVersionCheck)
+  if (!type.skipVersionCheck) {
     os << generateVersionCheck(2, type.sinceVersion, type.typeName,
                                "fileVersion", "&context", "file version is ");
+  }
 
   // Declare format flag and read flags only if type has optional params.
   generateOptionalParamFlagsReader(type, os);
@@ -727,12 +921,13 @@ LogicalResult parse{0}(EncodingReader &reader, Type &result) {{
   std::string args;
   for (const auto &param : type.parameters) {
     StringRef paramTypeRef(param.cppStorageType);
-    if (paramTypeRef.contains("SmallVector<int64_t>"))
+    if (paramTypeRef.contains("SmallVector<int64_t>")) {
       args += ", ArrayRef<int64_t>(" + param.name + ")";
-    else if (paramTypeRef.contains("SmallVector<int32_t>"))
+    } else if (paramTypeRef.contains("SmallVector<int32_t>")) {
       args += ", ArrayRef<int32_t>(" + param.name + ")";
-    else
+    } else {
       args += ", " + param.name;
+    }
   }
 
   os << formatv(R"(  
@@ -748,8 +943,9 @@ void mlir::tblgen::generateTypeDeserializers(
     const BytecodeTypeStructure &structure, raw_ostream &os) {
   emitSourceFileHeader("Generated Type Deserialization Functions", os);
   generateBuiltinTypeDeserializers(structure, os);
-  for (const auto &type : structure.cudaTileTypes)
+  for (const auto &type : structure.cudaTileTypes) {
     generateCudaTileTypeDeserializer(type, os);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -765,26 +961,29 @@ void mlir::tblgen::generateSerializerDispatch(
 
   // Built-in types.
   if (llvm::any_of(structure.builtinSerializableTypes,
-                   [](auto &t) { return t.isInteger(); }))
+                   [](auto &t) { return t.isInteger(); })) {
     os << R"(    .Case<IntegerType>([&](auto concreteType) {
       return serializeIntegerType(concreteType, writer, config);
     })
 )";
+  }
 
   if (llvm::any_of(structure.builtinSerializableTypes,
-                   [](auto &t) { return t.isFloat(); }))
+                   [](auto &t) { return t.isFloat(); })) {
     os << R"(    .Case<FloatType>([&](auto concreteType) {
       return serializeFloatType(concreteType, writer, config);
     })
 )";
+  }
 
   // CudaTile types.
-  for (const auto &type : structure.cudaTileTypes)
+  for (const auto &type : structure.cudaTileTypes) {
     os << formatv(R"(    .Case<{0}>([&](auto concreteType) {{
       return serialize{1}(concreteType, writer, config);
     })
 )",
                   type.qualifiedTypeName, type.typeName);
+  }
 
   // FunctionType and default case.
   os << R"(    .Case<FunctionType>([&](auto concreteType) {
@@ -802,21 +1001,32 @@ void mlir::tblgen::generateDependentTypeRegistration(
   emitSourceFileHeader("Generated Dependent Type Registration", os);
 
   for (const auto &type : structure.cudaTileTypes) {
-    // Check if type has Type parameters that need registration.
+    // Check if type has nested type-bearing parameters that need registration.
     if (!llvm::any_of(type.parameters, [](const BytecodeTypeParameter &p) {
-          return isTypeParameter(p.kind);
-        }))
+          return isTypeParameter(p.kind) ||
+                 needsAttributeTypeRegistration(p.kind);
+        })) {
       continue;
+    }
 
     // Generate registration for this type.
     os << formatv("if (auto concreteType = dyn_cast<{0}>(type)) {{\n",
                   type.qualifiedTypeName);
-    for (const auto &param : type.parameters)
-      if (isTypeParameter(param.kind))
+    for (const auto &param : type.parameters) {
+      if (isTypeParameter(param.kind)) {
         os << formatv(R"(  if (auto paramType = concreteType.{0}())
     getTypeIndex(paramType);
 )",
                       param.accessorName);
+        continue;
+      }
+
+      if (needsAttributeTypeRegistration(param.kind)) {
+        os << formatv(R"(  registerDependentAttributeTypes(concreteType.{0}());
+)",
+                      param.accessorName);
+      }
+    }
 
     os << "  return;\n}\n";
   }
@@ -832,19 +1042,21 @@ void mlir::tblgen::generateDeserializerDispatch(
   // Built-in types.
   for (const auto &builtinType : structure.builtinSerializableTypes) {
     os << "case Bytecode::TypeTag::" << builtinType.enumName << ":\n";
-    if (builtinType.isInteger())
+    if (builtinType.isInteger()) {
       os << "  return parseIntegerType(typeTag, result, context, "
             "fileVersion);\n";
-    else if (builtinType.isFloat())
+    } else if (builtinType.isFloat()) {
       os << "  return parseFloatType(typeTag, result, context, fileVersion);\n";
+    }
   }
 
   // CudaTile types.
-  for (const auto &type : structure.cudaTileTypes)
+  for (const auto &type : structure.cudaTileTypes) {
     os << formatv(R"(case Bytecode::TypeTag::{0}:
   return parse{0}(reader, result);
 )",
                   type.typeName);
+  }
 
   // FunctionType and default.
   os << R"(case Bytecode::TypeTag::FunctionType:
@@ -853,5 +1065,149 @@ default:
   return ::emitError(UnknownLoc::get(&context))
          << "unknown type tag: " << static_cast<int>(typeTag);
 }
+)";
+}
+
+void mlir::tblgen::generateTypeVersionMap(
+    const BytecodeTypeStructure &structure, raw_ostream &os) {
+  emitSourceFileHeader("Generated Type Version Map", os);
+
+  // Build integer switch cases and float .Case<> entries.
+  // Skip minimum version entries - they don't raise the min version.
+  std::string integerCasesStr;
+  std::string floatCasesStr;
+  llvm::raw_string_ostream integerCases(integerCasesStr);
+  llvm::raw_string_ostream floatCases(floatCasesStr);
+  for (const auto &bt : structure.builtinSerializableTypes) {
+    auto [majorStr, minorStr] = parseVersion(bt.sinceVersion);
+    if (isMinimumVersion(majorStr, minorStr)) {
+      continue;
+    }
+
+    if (bt.isInteger()) {
+      integerCases << formatv(R"(        case {0}:
+          return BytecodeVersion::fromVersion({1}, {2}, 0);
+)",
+                              bt.integerBitWidth, majorStr, minorStr);
+    } else if (bt.isFloat()) {
+      floatCases << formatv(R"(      .Case<mlir::{0}>([](auto) {{
+        return BytecodeVersion::fromVersion({1}, {2}, 0);
+      })
+)",
+                            bt.floatMlirTypeName, majorStr, minorStr);
+    }
+  }
+
+  os << R"(namespace mlir::cuda_tile::detail {
+
+/// Returns the minimum bytecode version required for an MLIR Type.
+/// Returns nullopt for unsupported types or those at minimum version.
+inline std::optional<BytecodeVersion>
+getTypeMinVersion(mlir::Type type) {
+  return llvm::TypeSwitch<Type, std::optional<BytecodeVersion>>(type)
+)";
+
+  // Only generate IntegerType case if we have non-minimum version integers.
+  if (!integerCasesStr.empty()) {
+    os << R"(      .Case<mlir::IntegerType>([](mlir::IntegerType intType)
+                              -> std::optional<BytecodeVersion> {
+        switch (intType.getWidth()) {
+)" << integerCasesStr
+       << R"(        default:
+          return std::nullopt;
+        }
+      })
+)";
+  }
+
+  // Only generate float cases if we have non-minimum version floats.
+  if (!floatCasesStr.empty()) {
+    os << floatCasesStr;
+  }
+
+  // Single pass: generate getTypeMinVersion cases and accumulate
+  // getTypeMinVersionRecursive cases.
+  std::string recursiveCasesStr;
+  llvm::raw_string_ostream recursiveCases(recursiveCasesStr);
+
+  for (const auto &type : structure.cudaTileTypes) {
+    // For getTypeMinVersion: non-minimum version types get a .Case entry.
+    if (!type.skipVersionCheck) {
+      auto [majorStr, minorStr] = parseVersion(type.sinceVersion);
+      if (!isMinimumVersion(majorStr, minorStr)) {
+        os << formatv(R"(      .Case<{0}>([](auto) {{
+        return BytecodeVersion::fromVersion({1}, {2}, 0);
+      })
+)",
+                      type.qualifiedTypeName, majorStr, minorStr);
+      }
+    }
+
+    // For getTypeMinVersionRecursive: types with nested Type parameters or
+    // attribute-valued parameters need recursive processing.
+    if (llvm::any_of(type.parameters, [](const BytecodeTypeParameter &p) {
+          return isTypeParameter(p.kind) || isAttributeVersionParameter(p.kind);
+        })) {
+      recursiveCases << formatv(R"(  if (auto t = dyn_cast<{0}>(type)) {{
+)",
+                                type.qualifiedTypeName);
+      for (const auto &param : type.parameters) {
+        if (isTypeParameter(param.kind)) {
+          recursiveCases << formatv(R"(    if (auto paramType = t.{0}())
+      updateMax(getTypeMinVersionRecursive(paramType));
+)",
+                                    param.accessorName);
+        } else if (isAttributeVersionParameter(param.kind)) {
+          if (param.kind == BytecodeTypeParameter::Kind::AttributeArray) {
+            recursiveCases << formatv(R"(    for (Attribute paramAttr : t.{0}())
+      updateMax(getAttrMinVersionRecursive(paramAttr));
+)",
+                                      param.accessorName);
+          } else {
+            recursiveCases << formatv(R"(    if (auto paramAttr = t.{0}())
+      updateMax(getAttrMinVersionRecursive(paramAttr));
+)",
+                                      param.accessorName);
+          }
+        }
+      }
+      recursiveCases << "  }\n";
+    }
+  }
+
+  os << R"(      .Default([](Type) -> std::optional<BytecodeVersion> {
+        return std::nullopt;
+      });
+}
+
+/// Process nested types recursively and return the maximum version required.
+/// This handles composite types like TileType, TensorViewType, etc.
+inline std::optional<BytecodeVersion>
+getTypeMinVersionRecursive(Type type) {
+  std::optional<BytecodeVersion> maxVersion;
+
+  auto updateMax = [&](std::optional<BytecodeVersion> v) {
+    if (v && (!maxVersion || *v > *maxVersion))
+      maxVersion = v;
+  };
+
+  // Get this type's version.
+  updateMax(getTypeMinVersion(type));
+
+  // FunctionType: has input and result types that need recursive processing.
+  if (auto funcType = dyn_cast<FunctionType>(type)) {
+    for (Type input : funcType.getInputs())
+      updateMax(getTypeMinVersionRecursive(input));
+    for (Type result : funcType.getResults())
+      updateMax(getTypeMinVersionRecursive(result));
+  }
+
+  // Process CudaTile types with nested Type parameters.
+)" << recursiveCasesStr
+     << R"(
+  return maxVersion;
+}
+
+} // namespace mlir::cuda_tile::detail
 )";
 }

@@ -3,15 +3,14 @@
 // expected-error @below{{only ops from the 'cuda_tile' dialect are allowed}}
 cuda_tile.module @kernels {
   cuda_tile.entry @kernel() {
-    // expected-remark @below{{invalid op}}
+    // expected-note @below{{invalid op}}
     "test.op_from_different_dialect"() : () -> ()
   }
 }
 
 // -----
 
-// expected-error @below{{only function and global ops are allowed in the body}}
 cuda_tile.module @kernels {
-  // expected-remark @below{{invalid op}}
+  // expected-error @below{{non-symbol operations are not allowed in a module body}}
   cuda_tile.constant <f32: 5.0> : !cuda_tile.tile<f32>
 }

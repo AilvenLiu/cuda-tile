@@ -49,10 +49,12 @@ public:
     return !(*this == other);
   }
   bool operator<(const BytecodeVersion &other) const {
-    if (verMajor != other.verMajor)
+    if (verMajor != other.verMajor) {
       return verMajor < other.verMajor;
-    if (verMinor != other.verMinor)
+    }
+    if (verMinor != other.verMinor) {
       return verMinor < other.verMinor;
+    }
     return verTag < other.verTag;
   }
   bool operator<=(const BytecodeVersion &other) const {
@@ -65,8 +67,9 @@ public:
 
   /// Convert the version to a human-readable string format.
   std::string toString() const {
-    if (verTag)
+    if (verTag) {
       return llvm::formatv("{0}.{1}.{2}", verMajor, verMinor, verTag).str();
+    }
     return llvm::formatv("{0}.{1}", verMajor, verMinor).str();
   }
 
@@ -89,8 +92,23 @@ public:
   /// single bitfield. For versions < 13.3, OptionalEnum uses inline flags.
   static const BytecodeVersion kUnifiedBitfieldVersion;
 
+  /// The version starting from which bits 3 and 4 of the function-table entry
+  /// flag byte have a meaning.
+  ///
+  /// The reader gates its acceptance of those bits on this version:
+  ///   * For bytecode at version < kFunctionFlagsExtendedVersion, bits 3 and
+  ///     4 are treated as reserved.
+  ///   * For bytecode at version >= kFunctionFlagsExtendedVersion, every
+  ///     set bit must be one the build recognizes; unknown bits are a hard
+  ///     error.
+  static const BytecodeVersion kFunctionFlagsExtendedVersion;
+
   /// The minimum supported version of the bytecode format.
   static const BytecodeVersion kMinSupportedVersion;
+
+  /// The first version that uses the canonical bit-packed wire format for
+  /// `i1` `DenseElementsAttr` payloads.
+  static const BytecodeVersion kCanonicalI1Version;
 
 private:
   /// Constructs a BytecodeVersion object with the given version components.

@@ -27,6 +27,7 @@ def DK_Analysis : TileIRDiagnosticKind<"Analysis", 3, "Analysis">;
 
 def CategoryTensorCore : TileIRCategory<"TensorCore", 1, "Tensor-core">;
 def CategoryMemory     : TileIRCategory<"Memory",     2, "Memory">;
+def CategoryHints      : TileIRCategory<"Hints",      3, "Hints">;
 //===--------------------------------------------------------------------===//
 // Remarks
 //===--------------------------------------------------------------------===//
@@ -39,11 +40,26 @@ def RemarkTensorCoreMMAFailed
   : TileIRRemark<"RemarkTensorCoreMMA", DK_Fail, CategoryTensorCore, 2, "MMA operation failed to optimize to use Tensor Cores, it is using FMA instructions instead">;
 
 // Memory Remarks
-def RemarkMemoryLoadOptimized
-  : TileIRRemark<"RemarkMemoryLoadOptimized", DK_Pass, CategoryMemory, 1, "Load operation successfully optimized to use TMA">;
+def RemarkMemoryLoadInstructionSelected
+  : TileIRRemark<"RemarkMemoryLoadInstructionSelected", DK_Pass, CategoryMemory, 1, "Load instruction selected">;
 
-def RemarkMemoryStoreOptimized
-  : TileIRRemark<"RemarkMemoryStoreOptimized", DK_Pass, CategoryMemory, 2, "Store operation successfully optimized to use TMA">;
+def RemarkMemoryStoreInstructionSelected
+  : TileIRRemark<"RemarkMemoryStoreInstructionSelected", DK_Pass, CategoryMemory, 2, "Store instruction selected">;
+
+def RemarkMemoryTmaLoadFailed
+  : TileIRRemark<"RemarkMemoryTmaLoadFailed", DK_Fail, CategoryMemory, 1, "Failed to select TMA load instruction">;
+
+def RemarkMemoryTmaStoreFailed
+  : TileIRRemark<"RemarkMemoryTmaStoreFailed", DK_Fail, CategoryMemory, 2, "Failed to select TMA store instruction">;
+
+def RemarkHint
+  : TileIRRemark<"RemarkHint", DK_Pass, CategoryHints, 1, "OptimizationHint used {0}">;
+def RemarkHintFailed
+  : TileIRRemark<"RemarkHint", DK_Fail, CategoryHints, 2, "OptimizationHint incorrect {0}">;
+def RemarkHintDefault
+  : TileIRRemark<"RemarkHintDefault", DK_Pass, CategoryHints, 3, "OptimizationHint used default {0}">;
+def RemarkHintOutOfRange
+  : TileIRRemark<"RemarkHintOutOfRange", DK_Miss, CategoryHints, 4, "OptimizationHint value out of range {0}">;
 
 //===--------------------------------------------------------------------===//
 // Remark Attribute Definitions
@@ -52,9 +68,15 @@ def RemarkMemoryStoreOptimized
 def RemarkID
     : I32EnumAttr<"RemarkID", "All TileIR remark IDs",
                   [RemarkTensorCoreMMA, 
-                   RemarkMemoryLoadOptimized, 
-                   RemarkMemoryStoreOptimized,
-                   RemarkTensorCoreMMAFailed
+                   RemarkMemoryLoadInstructionSelected,
+                   RemarkMemoryStoreInstructionSelected,
+                   RemarkTensorCoreMMAFailed,
+                   RemarkMemoryTmaLoadFailed,
+                   RemarkMemoryTmaStoreFailed,
+                   RemarkHint,
+                   RemarkHintFailed,
+                   RemarkHintDefault,
+                   RemarkHintOutOfRange
                    /*, ...*/]> {
   let cppNamespace = "::mlir::cuda_tile::remark";
   let genSpecializedAttr  = 0;
@@ -73,7 +95,8 @@ def DiagnosticKind : I32EnumAttr<"DiagnosticKind",
 def CategoryID : I32EnumAttr<"CategoryID",
                              "TileIR remark categories",
                              [CategoryTensorCore, 
-                              CategoryMemory
+                              CategoryMemory,
+                              CategoryHints
                              ]> {
   let cppNamespace        = "::mlir::cuda_tile::remark";
   let genSpecializedAttr  = 0;
